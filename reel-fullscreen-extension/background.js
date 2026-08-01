@@ -97,7 +97,7 @@ const TIKTOK_VIDEO_COOKIE = 'tt_csrf_token=i4X6OEF9-eQXqAFVJ8DstXvEexlToBZnPJes;
 // and capped at 64MiB. The response rule below adds CORS headers so that
 // cross-origin fetch from the page is permitted.
 async function refreshTikTokVideoHeaderRule() {
-  await chrome.declarativeNetRequest.updateSessionRules({
+  await chrome.declarativeNetRequest?.updateSessionRules({
     removeRuleIds: [TIKTOK_VIDEO_HEADER_RULE_ID],
     addRules: [
       {
