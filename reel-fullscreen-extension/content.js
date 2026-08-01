@@ -31,11 +31,56 @@
     state.loading = false;
   }
 
-  function setVideoSource(video) {
+  async function setVideoSource(video) {
     if (!state.videoEl || !video?.videoUrl) return;
-    state.videoEl.src = video.videoUrl;
-    state.videoEl.load();
-    state.videoEl.play().catch(() => {});
+
+    try {
+      // Ask the background worker to install the declarativeNetRequest rule
+      // that rewrites the forbidden request headers (Cookie/Origin/Referer/...)
+      // and adds CORS headers to the response. Content scripts can't call
+      // chrome.declarativeNetRequest themselves.
+      const prepared = await chrome.runtime.sendMessage({ type: 'prepareTikTokVideoFetch' });
+      if (prepared?.error) {
+        throw new Error(prepared.error);
+      }
+
+      // Fetch here rather than in the background worker: the bytes would
+      // otherwise have to cross the extension message boundary, which is
+      // JSON-encoded and hard-capped at 64MiB.
+      const response = await fetch(video.videoUrl, {
+        method: 'GET',
+        headers: { accept: '*/*' },
+        credentials: 'omit',
+        redirect: 'follow',
+      });
+
+      if (!response.ok) {
+        throw new Error(`TikTok video request failed: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      if (!blob.size) {
+        throw new Error('TikTok returned an empty video body');
+      }
+
+      const blobUrl = URL.createObjectURL(blob);
+
+      if (state.videoEl.src && state.videoEl.src.startsWith('blob:')) {
+        URL.revokeObjectURL(state.videoEl.src);
+      }
+
+      state.videoEl.src = blobUrl;
+      state.videoEl.load();
+      state.videoEl.play().catch(() => {});
+    } catch (error) {
+      if (state.frameWrap) {
+        state.frameWrap.innerHTML = '';
+        const fallback = document.createElement('div');
+        fallback.className = 'rfv-tiktok-error';
+        fallback.textContent = error.message || 'Unable to load TikTok video right now.';
+        state.frameWrap.appendChild(fallback);
+      }
+    }
   }
 
   async function fetchTikTokVideos() {
@@ -81,7 +126,7 @@
       if (!video?.videoUrl) {
         throw new Error('No TikTok video url returned');
       }
-      setVideoSource(video);
+      await setVideoSource(video);
     } catch (error) {
       if (state.frameWrap) {
         state.frameWrap.innerHTML = '';
@@ -166,12 +211,10 @@
       videoEl.setAttribute('muted', 'true');
       videoEl.setAttribute('playsinline', 'true');
       videoEl.setAttribute('webkit-playsinline', 'true');
-      videoEl.src = videos[0].videoUrl;
       state.videoEl = videoEl;
       frameWrap.innerHTML = '';
       frameWrap.appendChild(videoEl);
-      videoEl.load();
-      videoEl.play().catch(() => {});
+      await setVideoSource(videos[0]);
     } catch (error) {
       frameWrap.innerHTML = '';
       const fallback = document.createElement('div');
