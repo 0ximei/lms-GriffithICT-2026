@@ -50,6 +50,9 @@
   border-radius: 999px;
   background: rgba(20, 20, 22, 0.88);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  background: #5252524a;
+    border: 1px solid #ffffff47;
+    backdrop-filter: brightness(0.5) blur(12px);
   /* The wheel handler calls preventDefault, so don't let the browser start a
      scroll gesture on this element first. */
   touch-action: none;
