@@ -31,6 +31,13 @@
   const DEFAULT_UNLOCKED_SLOTS = 1;
   const SLOTS_STORAGE_KEY = 'rfvUnlockedSlots';
   const MUTED_STORAGE_KEY = 'rfvMuted';
+  const STATS_STORAGE_KEY = 'rfvStats';
+  // A reel held for at least this long counts as actually watched rather than
+  // scrolled past — the numerator of the scroll-efficiency figure.
+  const ENGAGED_MS = 3000;
+  // Rolling utilisation monitor: one sample a second over a one-minute window.
+  const MONITOR_SAMPLES = 60;
+  const MONITOR_INTERVAL_MS = 1000;
 
   // Simulated pricing for the demo unlock flow — nothing is ever charged.
   function slotPrice(slotNumber) {
@@ -70,6 +77,23 @@
     // { hero, videoEl, index, loading, lastStepAt } while the big player is open.
     viewer: null,
     previousBodyOverflow: '',
+    // Rolling window of utilisation percentages, oldest first. Sampled from
+    // page load so the monitor already has history when the panel is opened.
+    utilization: [],
+    scrollTimes: [],
+    monitorTimer: null,
+    sessionStart: Date.now(),
+    stats: {
+      scrolls: 0,
+      engaged: 0,
+      reelsSeen: 0,
+      playerMs: 0,
+      bytes: 0,
+      breaks: 0,
+      spend: 0,
+      dailyScrolls: {},
+      firstSeen: Date.now(),
+    },
   };
 
   // hero element -> { videoEl, baseIndex }
@@ -86,9 +110,13 @@
       const stored = await chrome.storage.local.get({
         [SLOTS_STORAGE_KEY]: DEFAULT_UNLOCKED_SLOTS,
         [MUTED_STORAGE_KEY]: false,
+        [STATS_STORAGE_KEY]: null,
       });
       state.unlockedSlots = Math.max(DEFAULT_UNLOCKED_SLOTS, Number(stored[SLOTS_STORAGE_KEY]) || DEFAULT_UNLOCKED_SLOTS);
       state.muted = Boolean(stored[MUTED_STORAGE_KEY]);
+      if (stored[STATS_STORAGE_KEY]) {
+        state.stats = { ...state.stats, ...stored[STATS_STORAGE_KEY] };
+      }
     } catch {
       state.unlockedSlots = DEFAULT_UNLOCKED_SLOTS;
     }
@@ -96,6 +124,95 @@
 
   function saveUnlockedSlots() {
     chrome.storage.local.set({ [SLOTS_STORAGE_KEY]: state.unlockedSlots }).catch(() => {});
+  }
+
+  function todayKey() {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  let saveStatsTimer = null;
+  function saveStats() {
+    // Stats tick on every scroll; batch the writes rather than hitting storage
+    // once per wheel event.
+    window.clearTimeout(saveStatsTimer);
+    saveStatsTimer = window.setTimeout(() => {
+      chrome.storage.local.set({ [STATS_STORAGE_KEY]: state.stats }).catch(() => {});
+    }, 400);
+  }
+
+  function recordScroll() {
+    const stats = state.stats;
+    stats.scrolls += 1;
+    stats.dailyScrolls[todayKey()] = (stats.dailyScrolls[todayKey()] ?? 0) + 1;
+    state.scrollTimes.push(Date.now());
+    saveStats();
+  }
+
+  // How much of the dashboard is streaming right now, 0–100. The CPU-meter
+  // analogue: every unlocked slot playing at once reads as fully loaded.
+  function currentUtilization() {
+    // With the big player open you're watching one reel at full attention,
+    // even though every card behind it is deliberately paused.
+    if (state.viewer && !state.viewer.videoEl.paused) return 100;
+
+    const total = reels.size;
+    if (!total) return 0;
+
+    const playing = Array.from(reels.values()).filter(
+      ({ videoEl }) => !videoEl.paused && !videoEl.ended && videoEl.readyState >= 2
+    ).length;
+
+    return Math.round((playing / total) * 100);
+  }
+
+  function scrollsPerMinute() {
+    const cutoff = Date.now() - 60000;
+    state.scrollTimes = state.scrollTimes.filter((time) => time >= cutoff);
+    return state.scrollTimes.length;
+  }
+
+  function sampleUtilization() {
+    state.utilization.push(currentUtilization());
+    if (state.utilization.length > MONITOR_SAMPLES) {
+      state.utilization.shift();
+    }
+  }
+
+  function startUtilizationSampling() {
+    if (state.monitorTimer) return;
+    // Seed the window so the chart has a baseline rather than one lone point.
+    state.utilization = new Array(MONITOR_SAMPLES).fill(0);
+    state.monitorTimer = window.setInterval(sampleUtilization, MONITOR_INTERVAL_MS);
+  }
+
+  function recordReelShown() {
+    state.stats.reelsSeen += 1;
+    saveStats();
+  }
+
+  function recordBytes(bytes) {
+    state.stats.bytes += bytes;
+    saveStats();
+  }
+
+  function recordBreakTaken() {
+    state.stats.breaks += 1;
+    saveStats();
+  }
+
+  function recordSpend(amount) {
+    state.stats.spend += Number(amount) || 0;
+    saveStats();
+  }
+
+  // Called when a reel leaves the player, so dwell decides whether it counted
+  // as watched or merely scrolled past.
+  function recordDwell(startedAt) {
+    if (!startedAt) return;
+    const dwell = Date.now() - startedAt;
+    state.stats.playerMs += dwell;
+    if (dwell >= ENGAGED_MS) state.stats.engaged += 1;
+    saveStats();
   }
 
   // Muted autoplay is always permitted; unmuted autoplay is not. Keep reels
@@ -198,11 +315,13 @@
       }
     }
 
+    recordBreakTaken();
     updateTimer();
     state.breakTimer = window.setInterval(updateTimer, 250);
   }
 
   function recordFeedScroll() {
+    recordScroll();
     if (state.breakOverlay) return;
     state.scrollsSinceBreak += 1;
     if (state.scrollsSinceBreak >= state.scrollsBeforeBreak) {
@@ -314,6 +433,10 @@
 
       if (!viewer.videoEl.isConnected) return;
 
+      recordDwell(viewer.shownAt);
+      viewer.shownAt = Date.now();
+      recordReelShown();
+
       viewer.index = nextIndex;
       if (viewer.progressFill) viewer.progressFill.style.width = '0%';
       updateViewerBadge();
@@ -340,6 +463,8 @@
   function closeReelViewer() {
     const viewer = document.querySelector('.rfv-viewer');
     if (!viewer) return;
+
+    recordDwell(state.viewer?.shownAt);
 
     viewer.remove();
     state.viewer = null;
@@ -517,8 +642,10 @@
       index: (entry?.baseIndex ?? 0) + state.stepOffset,
       loading: false,
       lastStepAt: 0,
+      shownAt: Date.now(),
     };
     updateViewerBadge();
+    recordReelShown();
 
     state.previousBodyOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -556,6 +683,7 @@
       throw new Error('TikTok returned an empty video body');
     }
 
+    recordBytes(blob.size);
     return URL.createObjectURL(blob);
   }
 
@@ -759,9 +887,333 @@
   }
 
   function unlockNextSlot() {
+    recordSpend(slotPrice(state.unlockedSlots + 1));
     state.unlockedSlots += 1;
     saveUnlockedSlots();
     applyUnlocks();
+  }
+
+  function formatDuration(ms) {
+    const totalSeconds = Math.round(ms / 1000);
+    if (totalSeconds < 60) return `${totalSeconds}s`;
+    const minutes = Math.floor(totalSeconds / 60);
+    if (minutes < 60) return `${minutes}m ${totalSeconds % 60}s`;
+    return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+  }
+
+  function formatBytes(bytes) {
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  }
+
+  // Last 7 days including today, oldest first.
+  function recentDays(count = 7) {
+    const days = [];
+    for (let offset = count - 1; offset >= 0; offset -= 1) {
+      const date = new Date();
+      date.setDate(date.getDate() - offset);
+      const key = date.toISOString().slice(0, 10);
+      days.push({
+        key,
+        label: date.toLocaleDateString(undefined, { weekday: 'short' }),
+        full: date.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }),
+        value: state.stats.dailyScrolls[key] ?? 0,
+      });
+    }
+    return days;
+  }
+
+  // Builds the SVG path pair for the rolling window. Coordinates run in a
+  // 300x100 viewBox; strokes are non-scaling so stretching keeps them 2px.
+  function utilizationPaths() {
+    const samples = state.utilization;
+    if (!samples.length) return { line: '', area: '' };
+
+    const stepX = 300 / Math.max(1, samples.length - 1);
+    const points = samples.map((value, index) => [index * stepX, 100 - value]);
+    const line = points.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
+    const area = `${line} L300,100 L0,100 Z`;
+
+    return { line, area };
+  }
+
+  function renderMonitor(root) {
+    const monitor = root.querySelector('.rfv-mon');
+    if (!monitor) return;
+
+    const samples = state.utilization;
+    const current = samples.at(-1) ?? 0;
+    const peak = samples.length ? Math.max(...samples) : 0;
+    const average = samples.length
+      ? Math.round(samples.reduce((sum, value) => sum + value, 0) / samples.length)
+      : 0;
+    const playing = Array.from(reels.values()).filter(({ videoEl }) => !videoEl.paused).length;
+    const { line, area } = utilizationPaths();
+
+    monitor.querySelector('.rfv-mon__area').setAttribute('d', area);
+    monitor.querySelector('.rfv-mon__line').setAttribute('d', line);
+    monitor.querySelector('.rfv-mon__value').textContent = `${current}%`;
+    monitor.querySelector('.rfv-mon__plot').setAttribute(
+      'aria-label',
+      `Reel utilisation over the last minute. Now ${current} percent, peak ${peak} percent, average ${average} percent.`
+    );
+
+    const readouts = {
+      active: `${playing}/${reels.size || 0}`,
+      peak: `${peak}%`,
+      average: `${average}%`,
+      rate: `${scrollsPerMinute()}/min`,
+      streamed: formatBytes(state.stats.bytes),
+      uptime: formatDuration(Date.now() - state.sessionStart),
+    };
+
+    for (const [key, value] of Object.entries(readouts)) {
+      const cell = monitor.querySelector(`[data-readout="${key}"]`);
+      if (cell) cell.textContent = value;
+    }
+  }
+
+  function monitorMarkup() {
+    return `
+      <section class="rfv-mon">
+        <div class="rfv-mon__head">
+          <h3 class="rfv-mon__title">Reel utilisation</h3>
+          <p class="rfv-mon__value">0%</p>
+        </div>
+
+        <div class="rfv-mon__plot-wrap">
+          <svg class="rfv-mon__plot" viewBox="0 0 300 100" preserveAspectRatio="none"
+               role="img" aria-label="Reel utilisation over the last minute">
+            <g class="rfv-mon__grid">
+              <line x1="0" y1="25" x2="300" y2="25" />
+              <line x1="0" y1="50" x2="300" y2="50" />
+              <line x1="0" y1="75" x2="300" y2="75" />
+            </g>
+            <path class="rfv-mon__area" d="" />
+            <path class="rfv-mon__line" d="" vector-effect="non-scaling-stroke" />
+          </svg>
+          <div class="rfv-mon__crosshair" hidden></div>
+          <div class="rfv-mon__tip" hidden></div>
+          <span class="rfv-mon__axis rfv-mon__axis--start">60s ago</span>
+          <span class="rfv-mon__axis rfv-mon__axis--end">now</span>
+        </div>
+
+        <dl class="rfv-mon__readouts">
+          <div><dt>Reels playing</dt><dd data-readout="active">0/0</dd></div>
+          <div><dt>Peak</dt><dd data-readout="peak">0%</dd></div>
+          <div><dt>Average</dt><dd data-readout="average">0%</dd></div>
+          <div><dt>Scroll rate</dt><dd data-readout="rate">0/min</dd></div>
+          <div><dt>Streamed</dt><dd data-readout="streamed">0 KB</dd></div>
+          <div><dt>Session</dt><dd data-readout="uptime">0s</dd></div>
+        </dl>
+      </section>
+    `;
+  }
+
+  function wireMonitorHover(root) {
+    const wrap = root.querySelector('.rfv-mon__plot-wrap');
+    const crosshair = root.querySelector('.rfv-mon__crosshair');
+    const tip = root.querySelector('.rfv-mon__tip');
+    if (!wrap) return;
+
+    wrap.addEventListener('mousemove', (event) => {
+      const rect = wrap.getBoundingClientRect();
+      const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+      const index = Math.round(ratio * (state.utilization.length - 1));
+      const value = state.utilization[index] ?? 0;
+      const secondsAgo = state.utilization.length - 1 - index;
+
+      crosshair.hidden = false;
+      crosshair.style.left = `${ratio * 100}%`;
+      tip.hidden = false;
+      tip.textContent = `${secondsAgo === 0 ? 'now' : `${secondsAgo}s ago`} · ${value}%`;
+      tip.style.left = `${ratio * 100}%`;
+    });
+
+    wrap.addEventListener('mouseleave', () => {
+      crosshair.hidden = true;
+      tip.hidden = true;
+    });
+  }
+
+  function closeStatsPanel() {
+    const panel = document.querySelector('.rfv-stats');
+    if (panel?.dataset.timer) {
+      window.clearInterval(Number(panel.dataset.timer));
+    }
+    panel?.remove();
+  }
+
+  function openStatsPanel() {
+    if (document.querySelector('.rfv-stats')) return;
+
+    const stats = state.stats;
+    // Efficiency = reels actually watched, out of every reel put in front of
+    // you. Deliberately not "scrolls per minute" — speed isn't the thing worth
+    // measuring here.
+    const efficiency = stats.reelsSeen ? Math.round((stats.engaged / stats.reelsSeen) * 100) : 0;
+    const avgPerReel = stats.reelsSeen ? stats.playerMs / stats.reelsSeen : 0;
+    const days = recentDays();
+    const peak = Math.max(1, ...days.map((day) => day.value));
+    const daysTracked = Math.max(1, Math.ceil((Date.now() - stats.firstSeen) / 86400000));
+
+    const tiles = [
+      { label: 'Reels scrolled', value: stats.scrolls.toLocaleString(), foot: `${(stats.scrolls / daysTracked).toFixed(1)} per day` },
+      { label: 'Time in player', value: formatDuration(stats.playerMs), foot: `${formatDuration(avgPerReel)} per reel` },
+      { label: 'Video downloaded', value: formatBytes(stats.bytes), foot: `${stats.reelsSeen} reels loaded` },
+      { label: 'Screen breaks', value: String(stats.breaks), foot: stats.breaks ? 'eyes rested' : 'none yet' },
+      { label: 'Slots unlocked', value: `${state.unlockedSlots}`, foot: `$${stats.spend.toFixed(2)} simulated` },
+      { label: 'Watched ≥3s', value: `${stats.engaged}`, foot: `of ${stats.reelsSeen} shown` },
+    ];
+
+    const panel = document.createElement('div');
+    panel.className = 'rfv-stats';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-label', 'Reel stats');
+
+    panel.innerHTML = `
+      <div class="rfv-stats__panel viz-root">
+        <div class="rfv-stats__head">
+          <div>
+            <p class="rfv-stats__kicker">Reel analytics</p>
+            <h2 class="rfv-stats__title">Your scrolling, measured</h2>
+          </div>
+          <button type="button" class="rfv-stats__close" title="Close" aria-label="Close stats">✕</button>
+        </div>
+
+        ${monitorMarkup()}
+
+        <section class="rfv-stats__hero">
+          <p class="rfv-stats__hero-label">Scroll efficiency</p>
+          <p class="rfv-stats__hero-value">${efficiency}<span class="rfv-stats__hero-unit">%</span></p>
+          <div class="rfv-stats__meter" role="img"
+               aria-label="Scroll efficiency ${efficiency} percent: ${stats.engaged} of ${stats.reelsSeen} reels watched for at least three seconds">
+            <div class="rfv-stats__meter-fill" style="width:${efficiency}%"></div>
+          </div>
+          <p class="rfv-stats__hero-foot">
+            Reels you actually watched (3s or more), out of every reel put in front of you.
+          </p>
+        </section>
+
+        <section class="rfv-stats__tiles">
+          ${tiles
+            .map(
+              (tile) => `
+            <div class="rfv-stats__tile">
+              <p class="rfv-stats__tile-label">${tile.label}</p>
+              <p class="rfv-stats__tile-value">${tile.value}</p>
+              <p class="rfv-stats__tile-foot">${tile.foot}</p>
+            </div>`
+            )
+            .join('')}
+        </section>
+
+        <section class="rfv-stats__chart-block">
+          <div class="rfv-stats__chart-head">
+            <h3 class="rfv-stats__chart-title">Reels scrolled per day</h3>
+            <button type="button" class="rfv-stats__table-toggle" aria-expanded="false">Table</button>
+          </div>
+
+          <div class="rfv-stats__chart">
+            ${days
+              .map(
+                (day) => `
+              <div class="rfv-stats__bar-col" tabindex="0"
+                   aria-label="${day.full}: ${day.value} reels"
+                   data-label="${day.full}" data-value="${day.value}">
+                ${day.value === peak && day.value > 0 ? `<span class="rfv-stats__bar-value">${day.value}</span>` : ''}
+                <div class="rfv-stats__bar" style="height:${(day.value / peak) * 100}%"></div>
+                <span class="rfv-stats__bar-label">${day.label}</span>
+              </div>`
+              )
+              .join('')}
+            <div class="rfv-stats__tooltip" hidden></div>
+          </div>
+
+          <table class="rfv-stats__table" hidden>
+            <caption class="rfv-stats__sr">Reels scrolled per day</caption>
+            <thead><tr><th scope="col">Day</th><th scope="col">Reels</th></tr></thead>
+            <tbody>
+              ${days.map((day) => `<tr><th scope="row">${day.full}</th><td>${day.value}</td></tr>`).join('')}
+            </tbody>
+          </table>
+        </section>
+      </div>
+    `;
+
+    panel.addEventListener('click', (event) => {
+      if (event.target === panel) closeStatsPanel();
+    });
+    panel.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') closeStatsPanel();
+    });
+    panel.querySelector('.rfv-stats__close').addEventListener('click', closeStatsPanel);
+
+    // Table view, so the figures are readable without relying on the bars.
+    const table = panel.querySelector('.rfv-stats__table');
+    const toggle = panel.querySelector('.rfv-stats__table-toggle');
+    toggle.addEventListener('click', () => {
+      const showing = table.hasAttribute('hidden');
+      table.toggleAttribute('hidden', !showing);
+      toggle.setAttribute('aria-expanded', String(showing));
+      toggle.textContent = showing ? 'Chart' : 'Table';
+    });
+
+    // Per-bar hover/focus readout.
+    const tooltip = panel.querySelector('.rfv-stats__tooltip');
+    for (const column of panel.querySelectorAll('.rfv-stats__bar-col')) {
+      const show = () => {
+        tooltip.textContent = `${column.dataset.label} · ${column.dataset.value} reels`;
+        tooltip.hidden = false;
+        tooltip.style.left = `${column.offsetLeft + column.offsetWidth / 2}px`;
+      };
+      const hide = () => {
+        tooltip.hidden = true;
+      };
+      column.addEventListener('mouseenter', show);
+      column.addEventListener('focus', show);
+      column.addEventListener('mouseleave', hide);
+      column.addEventListener('blur', hide);
+    }
+
+    document.body.appendChild(panel);
+
+    // The monitor keeps ticking while the panel is open; the sampler behind it
+    // runs regardless, so the window already holds a minute of history.
+    renderMonitor(panel);
+    wireMonitorHover(panel);
+    panel.dataset.timer = String(window.setInterval(() => renderMonitor(panel), MONITOR_INTERVAL_MS));
+
+    panel.querySelector('.rfv-stats__close').focus();
+  }
+
+  // Adds a "Reel Stats" entry to Canvas's global nav, matching its own markup
+  // so it inherits the sidebar styling.
+  function injectNavTab() {
+    const menu = document.getElementById('menu');
+    if (!menu || document.getElementById('rfv_stats_nav')) return;
+
+    const item = document.createElement('li');
+    item.className = 'menu-item ic-app-header__menu-list-item';
+    item.innerHTML = `
+      <a id="rfv_stats_nav" role="button" href="#" class="ic-app-header__menu-list-link">
+        <div class="menu-item-icon-container" aria-hidden="true">
+          <svg class="ic-icon-svg menu-item__icon" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M4 20h16v2H2V2h2v18Zm3-3V9h3v8H7Zm5.5 0V4h3v13h-3ZM18 17v-6h3v6h-3Z"/>
+          </svg>
+        </div>
+        <div class="menu-item__text">Reel Stats</div>
+      </a>
+    `;
+
+    item.querySelector('a').addEventListener('click', (event) => {
+      event.preventDefault();
+      openStatsPanel();
+    });
+
+    menu.appendChild(item);
   }
 
   function closeShop() {
@@ -922,6 +1374,8 @@
 
   function scanForHeroes() {
     state.scanQueued = false;
+    // The nav exists on every Canvas page, not just the dashboard.
+    injectNavTab();
     pruneDetachedHeroes();
 
     const heroes = [...document.querySelectorAll(HERO_SELECTOR)];
@@ -959,6 +1413,7 @@
     // the default of 1 rather than what was actually unlocked.
     await loadSettings();
     primeAudioOnFirstGesture();
+    startUtilizationSampling();
 
     queueScan();
 
