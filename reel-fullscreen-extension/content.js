@@ -30,10 +30,14 @@
   // Only the first course card plays a reel; the rest start locked.
   const DEFAULT_UNLOCKED_SLOTS = 1;
   const SLOTS_STORAGE_KEY = 'rfvUnlockedSlots';
+  const SLOT_MAP_STORAGE_KEY = 'rfvSlotByCourse';
   const MUTED_STORAGE_KEY = 'rfvMuted';
   const STATS_STORAGE_KEY = 'rfvStats';
   const PRO_STORAGE_KEY = 'rfvPro';
   const PRO_PRICE = '4.99';
+  // Share of card slots held back as ad inventory rather than showing a reel.
+  const AD_SLOT_PERCENT = 5;
+  const AD_DAY_RATE = 12;
   // A reel held for at least this long counts as actually watched rather than
   // scrolled past — the numerator of the scroll-efficiency figure.
   const ENGAGED_MS = 3000;
@@ -65,10 +69,11 @@
     // How far the whole dashboard has advanced. Stepped by the number of
     // course cards so each step reveals an entirely fresh set of reels.
     stepOffset: 0,
-    advancing: false,
+    // Bumped on each step so a late download from an earlier press can be
+    // discarded instead of overwriting the current reel.
+    stepGeneration: 0,
     lastStepAt: 0,
-    breakOverlay: null,
-    breakTimer: null,
+    lastWatchedHero: null,
     scrollsSinceBreak: 0,
     scrollsBeforeBreak: randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS),
     unlockedSlots: DEFAULT_UNLOCKED_SLOTS,
@@ -108,6 +113,11 @@
   // course href -> slot number, so a course keeps its slot across the DOM
   // rebuilds Canvas does when it re-renders the dashboard.
   const slotByCourse = new Map();
+  // feed position -> whether it drew an ad. See isAdSlot.
+  const adRolls = new Map();
+  // Cards currently on a screen break -> { timer, endsAt }. Breaks stack, so
+  // several cards can be resting at once, each on its own countdown.
+  const restingHeroes = new Map();
 
   async function loadSettings() {
     try {
@@ -116,8 +126,19 @@
         [MUTED_STORAGE_KEY]: false,
         [STATS_STORAGE_KEY]: null,
         [PRO_STORAGE_KEY]: false,
+        [SLOT_MAP_STORAGE_KEY]: null,
       });
       state.pro = Boolean(stored[PRO_STORAGE_KEY]);
+
+      // Restore which slot each course holds. Without this the assignment is
+      // rebuilt from DOM order every load, so a reordered dashboard would hand
+      // the unlocked slot to a different course.
+      const storedSlots = stored[SLOT_MAP_STORAGE_KEY];
+      if (storedSlots && typeof storedSlots === 'object') {
+        for (const [key, slot] of Object.entries(storedSlots)) {
+          if (Number.isInteger(slot)) slotByCourse.set(key, slot);
+        }
+      }
       state.unlockedSlots = Math.max(DEFAULT_UNLOCKED_SLOTS, Number(stored[SLOTS_STORAGE_KEY]) || DEFAULT_UNLOCKED_SLOTS);
       state.muted = Boolean(stored[MUTED_STORAGE_KEY]);
       if (stored[STATS_STORAGE_KEY]) {
@@ -130,6 +151,12 @@
 
   function saveUnlockedSlots() {
     chrome.storage.local.set({ [SLOTS_STORAGE_KEY]: state.unlockedSlots }).catch(() => {});
+  }
+
+  function saveSlotAssignments() {
+    chrome.storage.local
+      .set({ [SLOT_MAP_STORAGE_KEY]: Object.fromEntries(slotByCourse) })
+      .catch(() => {});
   }
 
   function todayKey() {
@@ -277,10 +304,10 @@
     state.pro = true;
     chrome.storage.local.set({ [PRO_STORAGE_KEY]: true }).catch(() => {});
 
-    // Slots stay locked — Pro only buys out of the screen breaks. Any already
-    // on screen goes now rather than making the user sit out a timer they
-    // just paid to skip.
-    clearEyeBreak();
+    // Slots stay locked — Pro only buys out of the screen breaks. Every card
+    // currently resting comes back now rather than making the user sit out
+    // timers they just paid to skip.
+    clearAllEyeBreaks();
     state.scrollsSinceBreak = 0;
     refreshPromoBanner();
   }
@@ -369,69 +396,121 @@
     return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
   }
 
-  function clearEyeBreak() {
-    if (state.breakTimer) {
-      window.clearInterval(state.breakTimer);
-      state.breakTimer = null;
+  function isHeroResting(hero) {
+    return Boolean(hero) && restingHeroes.has(hero);
+  }
+
+  // Ends one card's break. Breaks run per card and overlap, so each clears
+  // independently rather than tearing down a single shared timer.
+  function clearEyeBreak(hero) {
+    const rest = restingHeroes.get(hero);
+    if (!rest) return;
+
+    window.clearInterval(rest.timer);
+    restingHeroes.delete(hero);
+
+    hero.querySelector('.rfv-eye-break')?.remove();
+    hero.classList.remove('rfv-resting-hero');
+
+    // Put the rested card back to work.
+    const entry = reels.get(hero);
+    if (entry && hero.isConnected) {
+      showVideoAt(hero, entry.videoEl, entry.baseIndex + state.stepOffset).catch(() => {});
     }
-    state.breakOverlay?.remove();
-    state.breakOverlay = null;
+  }
+
+  function clearAllEyeBreaks() {
+    for (const hero of [...restingHeroes.keys()]) {
+      clearEyeBreak(hero);
+    }
+  }
+
+  // The card the next break lands on: whichever the user was actually
+  // watching, else something still playing. Cards already resting are skipped
+  // so a second break lands somewhere new.
+  function breakTargetHero() {
+    const available = (hero) => hero?.isConnected && reels.has(hero) && !isHeroResting(hero);
+
+    if (available(state.viewer?.hero)) return state.viewer.hero;
+    if (available(state.lastWatchedHero)) return state.lastWatchedHero;
+
+    for (const [hero, { videoEl }] of reels) {
+      if (available(hero) && !videoEl.paused) return hero;
+    }
+
+    for (const hero of reels.keys()) {
+      if (available(hero)) return hero;
+    }
+
+    return null;
   }
 
   function startEyeBreak() {
     // Pro subscribers never get interrupted.
-    if (state.pro || state.breakOverlay || !document.body) return;
+    if (state.pro) return;
+
+    // Null once every card is already resting — nothing left to rest.
+    const hero = breakTargetHero();
+    if (!hero) return;
+
+    // The break covers the card, so the expanded player has to step aside.
+    if (state.viewer?.hero === hero) closeReelViewer();
 
     const duration = randomInteger(MIN_BREAK_SECONDS, MAX_BREAK_SECONDS);
     const endsAt = Date.now() + duration * 1000;
-    const breakOverlay = document.createElement('section');
+
+    reels.get(hero)?.videoEl.pause();
+    hideAdOverlay(hero);
+
+    const breakOverlay = document.createElement('div');
     breakOverlay.className = 'rfv-eye-break';
-    breakOverlay.setAttribute('role', 'dialog');
-    breakOverlay.setAttribute('aria-modal', 'true');
-    breakOverlay.setAttribute('aria-labelledby', 'rfv-eye-break-title');
     breakOverlay.innerHTML = `
-      <div class="rfv-eye-break-content">
-        <p class="rfv-eye-break-kicker">Screen break</p>
-        <h2 id="rfv-eye-break-title">Look away from your screen</h2>
-        <div class="rfv-eye-break-timer" role="timer" aria-label="Break time remaining">
-          <span class="rfv-eye-break-countdown">${formatCountdown(duration)}</span>
-        </div>
-        <p class="rfv-eye-break-copy">Give your eyes a moment to rest.</p>
-        <button type="button" class="rfv-eye-break-upgrade">Upgrade to Pro to skip breaks</button>
+      <p class="rfv-eye-break-kicker">Screen break</p>
+      <div class="rfv-eye-break-timer" role="timer" aria-label="Break time remaining">
+        <span class="rfv-eye-break-countdown">${formatCountdown(duration)}</span>
       </div>
+      <p class="rfv-eye-break-copy">Rest your eyes — your other courses are still playing.</p>
+      <button type="button" class="rfv-eye-break-upgrade">Skip with Pro</button>
     `;
 
     const countdown = breakOverlay.querySelector('.rfv-eye-break-countdown');
     const timer = breakOverlay.querySelector('.rfv-eye-break-timer');
-    breakOverlay.querySelector('.rfv-eye-break-upgrade').addEventListener('click', openProDialog);
-    const preventScroll = (event) => event.preventDefault();
-    breakOverlay.addEventListener('wheel', preventScroll, { passive: false });
-    breakOverlay.addEventListener('touchmove', preventScroll, { passive: false });
-    document.body.appendChild(breakOverlay);
-    state.breakOverlay = breakOverlay;
+    breakOverlay.querySelector('.rfv-eye-break-upgrade').addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openProDialog();
+    });
+
+    if (getComputedStyle(hero).position === 'static') {
+      hero.style.position = 'relative';
+    }
+
+    hero.classList.add('rfv-resting-hero');
+    hero.appendChild(breakOverlay);
 
     function updateTimer() {
       const secondsLeft = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
       countdown.textContent = formatCountdown(secondsLeft);
       timer.style.setProperty('--rfv-break-progress', String(secondsLeft / duration));
 
-      if (secondsLeft === 0) {
-        clearEyeBreak();
-        state.scrollsSinceBreak = 0;
-        state.scrollsBeforeBreak = randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS);
-      }
+      // Only this card comes back; any other card still resting keeps its own
+      // timer running.
+      if (secondsLeft === 0) clearEyeBreak(hero);
     }
 
+    restingHeroes.set(hero, { timer: window.setInterval(updateTimer, 250), endsAt });
     recordBreakTaken();
     updateTimer();
-    state.breakTimer = window.setInterval(updateTimer, 250);
   }
 
   function recordFeedScroll() {
     recordScroll();
-    if (state.breakOverlay) return;
+    // Breaks stack: keep counting while cards are resting, so continuing to
+    // scroll puts more of the dashboard on a break rather than none.
     state.scrollsSinceBreak += 1;
     if (state.scrollsSinceBreak >= state.scrollsBeforeBreak) {
+      state.scrollsSinceBreak = 0;
+      state.scrollsBeforeBreak = randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS);
       startEyeBreak();
     }
   }
@@ -487,6 +566,13 @@
   // Serialized: cards attach concurrently and would otherwise all fire their
   // own fetch for the same range.
   function ensureVideos(minCount) {
+    // Fast path: the pool already covers this range, so don't join the fetch
+    // chain. Without this every card queues behind every other card on each
+    // step, turning a no-op into N sequential awaits.
+    if (state.videos.length >= minCount) {
+      return Promise.resolve(state.videos);
+    }
+
     state.fetchChain = (state.fetchChain ?? Promise.resolve()).then(() => fillTo(minCount));
     return state.fetchChain;
   }
@@ -518,7 +604,8 @@
   // viewer doesn't snap back to the clip you scrolled away from.
   async function stepViewer(step) {
     const viewer = state.viewer;
-    if (!viewer || viewer.loading || state.breakOverlay) return;
+    // Only blocked if the card behind this player is the one resting.
+    if (!viewer || viewer.loading || isHeroResting(viewer.hero)) return;
 
     const now = Date.now();
     if (now - viewer.lastStepAt < STEP_COOLDOWN_MS) return;
@@ -816,7 +903,35 @@
     { threshold: 0.1 }
   );
 
-  async function showVideoAt(hero, videoEl, index) {
+  async function showVideoAt(hero, videoEl, index, isCurrent = () => true) {
+    // A resting card stays put until its timer runs out.
+    if (isHeroResting(hero)) return;
+
+    // Precedence: locked beats ad beats reel. Locked and ad slots both fetch
+    // nothing, so an unpaid or unsold position costs no bandwidth.
+    const baseIndex = reels.get(hero)?.baseIndex ?? 0;
+
+    if (isSlotLocked(baseIndex)) {
+      videoEl.pause();
+      hideAdOverlay(hero);
+      showLockOverlay(hero);
+      return;
+    }
+
+    hideLockOverlay(hero);
+
+    // Ad inventory is decided by position in the feed, not by which card it
+    // is — so scrolling past an ad turns that slot back into a reel. No video
+    // is fetched while the ad is up.
+    if (isAdSlot(index)) {
+      videoEl.pause();
+      showAdOverlay(hero);
+      return;
+    }
+
+    hideAdOverlay(hero);
+    hero.dataset.rfvReel = 'done';
+
     const videos = await ensureVideos(index + 1);
     if (!videos.length) return;
 
@@ -824,7 +939,8 @@
     const safeIndex = index < videos.length ? index : index % videos.length;
     const blobUrl = await getBlobUrl(videos[safeIndex].videoUrl);
 
-    if (!hero.isConnected) return;
+    // A newer step may have landed while this download was in flight.
+    if (!hero.isConnected || !isCurrent()) return;
 
     // Not revoked: blob URLs are cached and shared between cards showing the
     // same reel, so revoking here would break the other cards using it.
@@ -833,11 +949,28 @@
     videoEl.play().catch(() => {});
   }
 
-  async function stepAll(step) {
+  // Warms the blobs for a block of feed positions so the next press swaps
+  // instantly instead of waiting on a download.
+  async function prefetchBlock(startIndex, count) {
+    const videos = await ensureVideos(startIndex + count).catch(() => null);
+    if (!videos?.length) return;
+
+    for (let index = startIndex; index < startIndex + count; index += 1) {
+      if (isAdSlot(index)) continue;
+      const video = videos[index < videos.length ? index : index % videos.length];
+      if (video) getBlobUrl(video.videoUrl).catch(() => {});
+    }
+  }
+
+  // Deliberately not async: the offset is applied and the cards are kicked off
+  // synchronously, so the control stays live. Awaiting every card's download
+  // here is what used to grey the button out for the length of N video
+  // fetches. The cooldown alone throttles repeat presses.
+  function stepAll(step) {
     const now = Date.now();
-    // One wheel gesture emits a burst of events, and cached reels resolve
-    // instantly, so without a cooldown a single flick would skip many reels.
-    if (state.advancing || state.breakOverlay || now - state.lastStepAt < STEP_COOLDOWN_MS) return;
+    // A resting card no longer stops the whole dashboard — only that card is
+    // held back, further down.
+    if (now - state.lastStepAt < STEP_COOLDOWN_MS) return;
 
     for (const hero of reels.keys()) {
       if (!hero.isConnected) reels.delete(hero);
@@ -852,31 +985,28 @@
     const nextOffset = Math.max(0, state.stepOffset + step * cardCount);
     if (nextOffset === state.stepOffset) return;
 
-    state.advancing = true;
     state.lastStepAt = now;
-    state.control?.classList.add('rfv-reel-control--busy');
+    state.stepOffset = nextOffset;
 
-    try {
-      state.stepOffset = nextOffset;
+    // Guards against a slow download from an earlier press landing after a
+    // later one and pasting a stale reel onto the card.
+    const generation = (state.stepGeneration += 1);
+    const isCurrent = () => generation === state.stepGeneration;
 
-      await Promise.all(
-        Array.from(reels, ([hero, { videoEl, baseIndex }]) =>
-          showVideoAt(hero, videoEl, baseIndex + state.stepOffset).catch((error) => {
-            console.warn('[reel-fullscreen] Could not load reel:', error.message);
-          })
-        )
-      );
-    } finally {
-      state.advancing = false;
-      state.control?.classList.remove('rfv-reel-control--busy');
+    for (const [hero, { videoEl, baseIndex }] of reels) {
+      // The resting card keeps its break; stepping past it would hand the user
+      // a fresh reel and defeat the point of the break.
+      if (isHeroResting(hero)) continue;
+
+      showVideoAt(hero, videoEl, baseIndex + state.stepOffset, isCurrent).catch((error) => {
+        console.warn('[reel-fullscreen] Could not load reel:', error.message);
+      });
     }
 
     recordFeedScroll();
 
-    // Pull the batch after this one now, so the next step doesn't stall on a
-    // round trip to TIKTOK_API_URL.
     if (step > 0) {
-      ensureVideos(state.stepOffset + cardCount * 2).catch(() => {});
+      prefetchBlock(state.stepOffset + cardCount, cardCount);
     }
   }
 
@@ -954,13 +1084,128 @@
     return state.control;
   }
 
-  function renderLockedHero(hero, index) {
-    hero.classList.add('rfv-reel-hero', 'rfv-locked-hero');
-    hero.closest('.ic-DashboardCard__header')?.classList.add('rfv-has-reel');
+  // Which slots are ad inventory. Hashed rather than random so a Canvas
+  // re-render doesn't flip a slot between ad and reel on every repaint, and
+  // slot 0 is always a reel — otherwise a single-slot dashboard shows no
+  // video at all.
+  function isAdSlot(index) {
+    if (index <= 0) return false;
 
-    if (getComputedStyle(hero).position === 'static') {
-      hero.style.position = 'relative';
+    // Rolled once per feed position and remembered. Rolling on every call
+    // would re-decide on each Canvas repaint, flickering a slot between ad
+    // and reel; memoising keeps a position's outcome fixed once it's drawn,
+    // while still being genuinely random rather than a fixed pattern.
+    if (!adRolls.has(index)) {
+      adRolls.set(index, Math.random() * 100 < AD_SLOT_PERCENT);
     }
+
+    return adRolls.get(index);
+  }
+
+  function closeAdSalesDialog() {
+    document.querySelector('.rfv-adsale')?.remove();
+  }
+
+  function openAdSalesDialog() {
+    if (document.querySelector('.rfv-adsale')) return;
+
+    const stats = state.stats;
+    const avgDwell = stats.reelsSeen ? stats.playerMs / stats.reelsSeen : 0;
+
+    const dialog = document.createElement('div');
+    dialog.className = 'rfv-adsale';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.innerHTML = `
+      <div class="rfv-adsale__panel">
+        <p class="rfv-adsale__kicker">Media kit</p>
+        <h2 class="rfv-adsale__title">Advertise on this dashboard</h2>
+        <p class="rfv-adsale__copy">
+          Reach students at the exact moment they open their course list and
+          decide not to study.
+        </p>
+
+        <dl class="rfv-adsale__metrics">
+          <div><dt>Reels served</dt><dd>${stats.reelsSeen.toLocaleString()}</dd></div>
+          <div><dt>Scrolls logged</dt><dd>${stats.scrolls.toLocaleString()}</dd></div>
+          <div><dt>Avg. attention</dt><dd>${formatDuration(avgDwell)}</dd></div>
+          <div><dt>Slots available</dt><dd>${Math.max(0, heroSlots.size - 1)}</dd></div>
+        </dl>
+
+        <div class="rfv-adsale__actions">
+          <button type="button" class="rfv-adsale__buy">Enquire — from $${AD_DAY_RATE}/day</button>
+          <button type="button" class="rfv-adsale__close">Close</button>
+        </div>
+        <p class="rfv-adsale__note">Demo only — no enquiry is sent and no details are collected.</p>
+      </div>
+    `;
+
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) closeAdSalesDialog();
+    });
+    dialog.querySelector('.rfv-adsale__close').addEventListener('click', closeAdSalesDialog);
+    dialog.querySelector('.rfv-adsale__buy').addEventListener('click', () => {
+      const panel = dialog.querySelector('.rfv-adsale__panel');
+      panel.innerHTML = `
+        <p class="rfv-adsale__kicker">Media kit</p>
+        <h2 class="rfv-adsale__title">Thanks — we'll be in touch</h2>
+        <p class="rfv-adsale__copy">Nothing was actually sent. This is a demo.</p>
+        <div class="rfv-adsale__actions">
+          <button type="button" class="rfv-adsale__close">Close</button>
+        </div>
+      `;
+      panel.querySelector('.rfv-adsale__close').addEventListener('click', closeAdSalesDialog);
+    });
+
+    document.body.appendChild(dialog);
+    dialog.querySelector('.rfv-adsale__buy').focus();
+  }
+
+  // An unsold slot advertises itself: the feed's own inventory, for sale.
+  // Ads are shown and hidden in place rather than replacing the card's video
+  // element, so scrolling past an ad turns the same slot back into a reel
+  // without rebuilding the DOM or losing the slot's place in the feed.
+  function showAdOverlay(hero) {
+    hero.classList.add('rfv-ad-hero');
+    hero.dataset.rfvReel = 'ad';
+
+    if (hero.querySelector('.rfv-ad')) return;
+
+    const ad = document.createElement('div');
+    ad.className = 'rfv-ad';
+    ad.innerHTML = `
+      <span class="rfv-ad__tag">Ad space</span>
+      <p class="rfv-ad__headline">Your ad could be here</p>
+      <p class="rfv-ad__price">From $${AD_DAY_RATE}/day</p>
+      <button type="button" class="rfv-ad__cta">Enquire</button>
+    `;
+
+    ad.querySelector('.rfv-ad__cta').addEventListener('click', (event) => {
+      // The card is wrapped in a link to the course — don't navigate.
+      event.preventDefault();
+      event.stopPropagation();
+      openAdSalesDialog();
+    });
+
+    hero.appendChild(ad);
+  }
+
+  function hideAdOverlay(hero) {
+    hero.classList.remove('rfv-ad-hero');
+    hero.querySelector('.rfv-ad')?.remove();
+  }
+
+  // A card's lock never moves: the first N slots are the ones paid for, and
+  // they stay unlocked no matter how far the feed has scrolled.
+  function isSlotLocked(baseIndex) {
+    return baseIndex >= state.unlockedSlots;
+  }
+
+  function showLockOverlay(hero) {
+    hero.classList.add('rfv-locked-hero');
+    hero.dataset.rfvReel = 'locked';
+
+    if (hero.querySelector('.rfv-lock')) return;
 
     const lock = document.createElement('div');
     lock.className = 'rfv-lock';
@@ -971,25 +1216,26 @@
       <svg viewBox="0 0 24 24" class="rfv-lock__icon" focusable="false">
         <path fill="currentColor" d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm0 2a3 3 0 0 1 3 3v3H9V7a3 3 0 0 1 3-3Zm0 11a1.5 1.5 0 0 1 .75 2.8V19a.75.75 0 0 1-1.5 0v-1.2A1.5 1.5 0 0 1 12 15Z"/>
       </svg>
-      <span class="rfv-lock__label">Slot ${index + 1} locked</span>
+      <span class="rfv-lock__label">Locked</span>
     `;
 
     hero.appendChild(lock);
-    hero.dataset.rfvReel = 'locked';
   }
 
-  // Fill any slots that have become unlocked since the cards were rendered.
+  function hideLockOverlay(hero) {
+    hero.classList.remove('rfv-locked-hero');
+    hero.querySelector('.rfv-lock')?.remove();
+  }
+
+  // Re-evaluate every card against the current allowance — used after a
+  // purchase, when one more card can play.
   function applyUnlocks() {
     pruneDetachedHeroes();
 
-    for (const [hero, index] of heroSlots) {
-      if (hero.dataset.rfvReel !== 'locked' || index >= state.unlockedSlots) continue;
-
-      hero.querySelector('.rfv-lock')?.remove();
-      hero.classList.remove('rfv-locked-hero');
-      hero.dataset.rfvReel = '';
-      attachReel(hero, index);
+    for (const [hero, { videoEl, baseIndex }] of reels) {
+      showVideoAt(hero, videoEl, baseIndex + state.stepOffset).catch(() => {});
     }
+
     updateControlState();
   }
 
@@ -1393,15 +1639,6 @@
   async function attachReel(hero, index) {
     if (hero.dataset.rfvReel) return;
     heroSlots.set(hero, index);
-
-    // Locked slots show a padlock instead of downloading a reel.
-    if (index >= state.unlockedSlots) {
-      renderLockedHero(hero, index);
-      ensureControl();
-      updateControlState();
-      return;
-    }
-
     hero.dataset.rfvReel = 'pending';
 
     try {
@@ -1410,23 +1647,17 @@
       const baseIndex = index;
       const targetIndex = baseIndex + state.stepOffset;
 
-      const videos = await ensureVideos(targetIndex + 1);
-      if (!videos.length) {
-        throw new Error('No TikTok videos returned');
-      }
-
-      const safeIndex = targetIndex < videos.length ? targetIndex : targetIndex % videos.length;
-      const blobUrl = await getBlobUrl(videos[safeIndex].videoUrl);
-
-      // The card may have been re-rendered by Canvas while we were fetching.
+      // The card may have been re-rendered by Canvas since the scan.
       if (!hero.isConnected) {
         hero.dataset.rfvReel = '';
         return;
       }
 
+      // The video element is built even for an ad slot: ads hide it rather
+      // than replace it, so scrolling on turns the same card back into a reel
+      // without rebuilding anything.
       const videoEl = document.createElement('video');
       videoEl.className = 'rfv-reel-video';
-      videoEl.src = blobUrl;
       videoEl.autoplay = true;
       videoEl.loop = true;
       videoEl.muted = shouldMuteNow();
@@ -1439,6 +1670,8 @@
       videoEl.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
+        // Remembered so a break lands on the card the user actually watched.
+        state.lastWatchedHero = hero;
         openReelViewer(hero, videoEl);
       });
 
@@ -1452,13 +1685,15 @@
       hero.closest('.ic-DashboardCard__header')?.classList.add('rfv-has-reel');
       hero.appendChild(videoEl);
       visibilityObserver.observe(videoEl);
-      videoEl.play().catch(() => {});
 
+      // Registered before the first paint so the scroll controls can advance
+      // this card even while it is currently showing an ad.
       reels.set(hero, { videoEl, baseIndex });
       ensureControl();
       updateControlState();
 
-      hero.dataset.rfvReel = 'done';
+      // Decides ad vs reel for this feed position and loads accordingly.
+      await showVideoAt(hero, videoEl, targetIndex);
     } catch (error) {
       hero.dataset.rfvReel = 'error';
       // Every card fails for the same reason, so only report the first one.
@@ -1501,22 +1736,41 @@
 
     const heroes = [...document.querySelectorAll(HERO_SELECTOR)];
 
+    let attachedAny = false;
     heroes.forEach((hero, position) => {
       if (hero.dataset.rfvReel) return;
-
-      // Slot follows the card's position on the dashboard, remembered per
-      // course. Using a running counter meant every Canvas re-render handed
-      // out fresh, ever-higher numbers, so no card was ever slot 0.
-      const key = courseKeyFor(hero);
-      let slot = position;
-
-      if (key) {
-        if (!slotByCourse.has(key)) slotByCourse.set(key, position);
-        slot = slotByCourse.get(key);
-      }
-
-      attachReel(hero, slot);
+      attachReel(hero, slotFor(hero, position));
+      attachedAny = true;
     });
+
+    // Each card decides lock-vs-ad-vs-reel the moment it attaches, when the
+    // reels map may still be half-populated — so the allowance would be drawn
+    // against the wrong card count. Re-run once the scan has registered
+    // everyone. Blobs are cached, so this costs no extra downloads.
+    if (attachedAny) {
+      requestAnimationFrame(() => applyUnlocks());
+    }
+  }
+
+  // A course keeps the same slot number for good: it's stored, so an unlocked
+  // course stays unlocked across reloads even if Canvas reorders the cards.
+  // A running counter or bare DOM position would reassign on every render.
+  function slotFor(hero, position) {
+    const key = courseKeyFor(hero);
+    if (!key) return position;
+
+    const existing = slotByCourse.get(key);
+    if (Number.isInteger(existing)) return existing;
+
+    // New course: prefer its position, but never collide with a slot already
+    // promised to another course.
+    const taken = new Set(slotByCourse.values());
+    let slot = position;
+    while (taken.has(slot)) slot += 1;
+
+    slotByCourse.set(key, slot);
+    saveSlotAssignments();
+    return slot;
   }
 
   function queueScan() {

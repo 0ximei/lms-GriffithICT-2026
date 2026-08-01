@@ -58,11 +58,6 @@
   touch-action: none;
 }
 
-.rfv-reel-control--busy {
-  opacity: 0.6;
-  pointer-events: none;
-}
-
 .rfv-reel-control__label {
   color: rgba(255, 255, 255, 0.75);
   font: 10px/1 system-ui, sans-serif;
@@ -387,57 +382,51 @@
   font-size: 0.72rem;
 }
 
+/* Screen break, scoped to a single card. It covers only the slot the user
+   was watching — the rest of the dashboard keeps playing, so they can move to
+   another course instead of being locked out entirely. */
+.ic-DashboardCard__header_hero.rfv-resting-hero .rfv-reel-video {
+  filter: blur(6px) brightness(0.5);
+}
+
 .rfv-eye-break {
-  position: fixed;
-  z-index: 2147483647;
+  position: absolute;
   inset: 0;
+  z-index: 3;
   display: grid;
-  place-items: center;
-  padding: 24px;
-  background: rgba(5, 10, 20, 0.96);
+  place-content: center;
+  justify-items: center;
+  gap: 5px;
+  padding: 8px;
+  background: rgba(5, 10, 20, 0.86);
   color: #f8fbff;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   text-align: center;
-  touch-action: none;
-}
-
-.rfv-eye-break-content {
-  display: grid;
-  justify-items: center;
-  gap: 18px;
 }
 
 .rfv-eye-break-kicker {
   margin: 0;
   color: #9cc7ff;
-  font-size: 0.75rem;
+  font-size: 0.58rem;
   font-weight: 700;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-}
-
-.rfv-eye-break h2 {
-  max-width: 18ch;
-  margin: 0;
-  font-size: clamp(1.75rem, 4vw, 2.5rem);
-  line-height: 1.08;
 }
 
 .rfv-eye-break-timer {
   --rfv-break-progress: 1;
   display: grid;
-  width: min(50vw, 220px);
+  width: 54px;
   aspect-ratio: 1;
   place-items: center;
   border-radius: 50%;
   background: conic-gradient(#8ec5ff calc(var(--rfv-break-progress) * 1turn), rgba(255, 255, 255, 0.13) 0);
-  box-shadow: 0 0 44px rgba(115, 180, 255, 0.24);
 }
 
 .rfv-eye-break-timer::before {
   grid-area: 1 / 1;
-  width: calc(100% - 14px);
-  height: calc(100% - 14px);
+  width: calc(100% - 7px);
+  height: calc(100% - 7px);
   border-radius: inherit;
   background: #0d1a2d;
   content: "";
@@ -446,16 +435,17 @@
 .rfv-eye-break-countdown {
   z-index: 1;
   grid-area: 1 / 1;
-  font-size: clamp(2rem, 7vw, 3.4rem);
+  font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
   font-weight: 700;
-  letter-spacing: 0.04em;
 }
 
 .rfv-eye-break-copy {
+  max-width: 22ch;
   margin: 0;
   color: #c5d3e8;
-  font-size: 1rem;
+  font-size: 0.66rem;
+  line-height: 1.35;
 }
 
 /* ── Reel stats dashboard ───────────────────────────────────────────────────
@@ -968,14 +958,15 @@
 
 /* Upgrade prompt on the break screen. */
 .rfv-eye-break-upgrade {
-  margin-top: 4px;
-  padding: 10px 20px;
+  margin-top: 2px;
+  padding: 5px 12px;
   border: none;
   border-radius: 999px;
   background: #ffd666;
   color: #2a2000;
-  font: 700 0.85rem system-ui, sans-serif;
+  font: 700 0.66rem system-ui, sans-serif;
   cursor: pointer;
+  pointer-events: auto;
 }
 
 .rfv-eye-break-upgrade:hover {
@@ -1073,4 +1064,181 @@
   margin: 16px 0 0;
   color: #8fa3c0;
   font-size: 0.7rem;
+}
+
+/* ── House ad: an unsold card slot selling itself ───────────────────────── */
+/* Ad slots sit above the card link (via .rfv-reel-hero) so the CTA is
+   clickable, but unlike a reel the banner itself isn't a play target. The
+   video element stays in place underneath, just hidden — scrolling on swaps
+   the same card straight back to a reel. */
+.ic-DashboardCard__header_hero.rfv-ad-hero {
+  cursor: default;
+}
+
+.ic-DashboardCard__header_hero.rfv-ad-hero .rfv-reel-video {
+  display: none;
+}
+
+.rfv-ad {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 5px;
+  padding: 10px;
+  background: repeating-linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.05) 0 8px,
+      transparent 8px 16px
+    ),
+    linear-gradient(140deg, #101a2c, #1d2f4d);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.16);
+  color: #f2f6ff;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: center;
+}
+
+.rfv-ad__tag {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.rfv-ad__headline {
+  margin: 2px 0 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.rfv-ad__price {
+  margin: 0;
+  color: #9cc7ff;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.rfv-ad__cta {
+  margin-top: 4px;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 999px;
+  background: #ffd666;
+  color: #2a2000;
+  font: 700 0.72rem system-ui, sans-serif;
+  cursor: pointer;
+  /* The hero sits above Canvas's full-card link, so this is clickable. */
+  pointer-events: auto;
+}
+
+.rfv-ad__cta:hover {
+  background: #ffdf8a;
+}
+
+/* ── Ad sales dialog ────────────────────────────────────────────────────── */
+.rfv-adsale {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483646;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(4, 8, 16, 0.76);
+}
+
+.rfv-adsale__panel {
+  width: min(100%, 400px);
+  padding: 26px;
+  border-radius: 18px;
+  background: #10192a;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.09);
+  color: #f2f6ff;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.rfv-adsale__kicker {
+  margin: 0 0 4px;
+  color: #9cc7ff;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.rfv-adsale__title {
+  margin: 0 0 10px;
+  font-size: 1.4rem;
+  line-height: 1.2;
+}
+
+.rfv-adsale__copy {
+  margin: 0 0 18px;
+  color: #c5d3e8;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.rfv-adsale__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin: 0 0 20px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+}
+
+.rfv-adsale__metrics dt {
+  color: #8fa3c0;
+  font-size: 0.64rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.rfv-adsale__metrics dd {
+  margin: 3px 0 0;
+  font-size: 1.05rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.rfv-adsale__actions {
+  display: grid;
+  gap: 8px;
+}
+
+.rfv-adsale__buy {
+  padding: 11px 18px;
+  border: none;
+  border-radius: 999px;
+  background: #ffd666;
+  color: #2a2000;
+  font: 700 0.9rem system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rfv-adsale__buy:hover {
+  background: #ffdf8a;
+}
+
+.rfv-adsale__close {
+  padding: 10px 18px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #e8eefc;
+  font: 600 0.85rem system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rfv-adsale__note {
+  margin: 16px 0 0;
+  color: #8fa3c0;
+  font-size: 0.7rem;
+  text-align: center;
 }
