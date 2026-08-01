@@ -897,7 +897,13 @@
 
 /* ── Pro subscription promo ─────────────────────────────────────────────── */
 .rfv-promo {
-  position: relative;
+  /* Pinned to the viewport top so it stays put while the page scrolls, and
+     sits above Canvas's own fixed chrome. Below the modal layers, so dialogs
+     and the break screen still cover it. */
+  position: fixed;
+  top: 0;
+  right: 0;
+  left: 0;
   z-index: 2147483640;
   display: flex;
   align-items: center;
