@@ -67,6 +67,9 @@
     // Browsers only allow autoplay with sound after the user has interacted
     // with the page, so reels start silent and switch on at the first gesture.
     audioPrimed: false,
+    // { hero, videoEl, index, loading, lastStepAt } while the big player is open.
+    viewer: null,
+    previousBodyOverflow: '',
   };
 
   // hero element -> { videoEl, baseIndex }
@@ -266,6 +269,71 @@
     if (event.key === 'Escape') {
       event.preventDefault();
       closeReelViewer();
+      return;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'PageDown') {
+      event.preventDefault();
+      stepViewer(1);
+    }
+    if (event.key === 'ArrowUp' || event.key === 'PageUp') {
+      event.preventDefault();
+      stepViewer(-1);
+    }
+  }
+
+  function updateViewerBadge() {
+    const viewer = state.viewer;
+    if (!viewer?.badge) return;
+    viewer.badge.textContent = `Reel ${viewer.index + 1}`;
+  }
+
+  // Advances only the open viewer, leaving every dashboard card alone. The
+  // card this was opened from is re-pointed at the same reel so closing the
+  // viewer doesn't snap back to the clip you scrolled away from.
+  async function stepViewer(step) {
+    const viewer = state.viewer;
+    if (!viewer || viewer.loading || state.breakOverlay) return;
+
+    const now = Date.now();
+    if (now - viewer.lastStepAt < STEP_COOLDOWN_MS) return;
+
+    const nextIndex = Math.max(0, viewer.index + step);
+    if (nextIndex === viewer.index) return;
+
+    viewer.loading = true;
+    viewer.lastStepAt = now;
+    viewer.stage?.classList.add('is-loading');
+    viewer.stage?.classList.toggle('is-stepping-back', step < 0);
+
+    try {
+      const videos = await ensureVideos(nextIndex + 1);
+      if (!videos.length) return;
+
+      const safeIndex = nextIndex < videos.length ? nextIndex : nextIndex % videos.length;
+      const blobUrl = await getBlobUrl(videos[safeIndex].videoUrl);
+
+      if (!viewer.videoEl.isConnected) return;
+
+      viewer.index = nextIndex;
+      if (viewer.progressFill) viewer.progressFill.style.width = '0%';
+      updateViewerBadge();
+      viewer.videoEl.src = blobUrl;
+      viewer.videoEl.load();
+      viewer.videoEl.play().catch(() => {});
+
+      // Keep the originating card on the same reel. baseIndex is stored
+      // relative to stepOffset so the global control keeps working afterwards.
+      const entry = reels.get(viewer.hero);
+      if (entry) {
+        entry.baseIndex = nextIndex - state.stepOffset;
+        entry.videoEl.src = blobUrl;
+        entry.videoEl.load();
+      }
+
+      recordFeedScroll();
+    } finally {
+      viewer.loading = false;
+      viewer.stage?.classList.remove('is-loading');
     }
   }
 
@@ -274,6 +342,7 @@
     if (!viewer) return;
 
     viewer.remove();
+    state.viewer = null;
     document.removeEventListener('keydown', onViewerKey, true);
     document.body.style.overflow = state.previousBodyOverflow ?? '';
 
@@ -283,7 +352,7 @@
     }
   }
 
-  function openReelViewer(sourceVideoEl) {
+  function openReelViewer(hero, sourceVideoEl) {
     if (document.querySelector('.rfv-viewer')) return;
 
     // Pause every card reel so its audio doesn't play under the viewer.
@@ -299,18 +368,44 @@
 
     const stage = document.createElement('div');
     stage.className = 'rfv-viewer__stage';
+    stage.innerHTML = `
+      <video class="rfv-viewer__video" playsinline webkit-playsinline loop autoplay></video>
+      <div class="rfv-viewer__scrim rfv-viewer__scrim--top"></div>
+      <div class="rfv-viewer__scrim rfv-viewer__scrim--bottom"></div>
+      <div class="rfv-viewer__spinner" aria-hidden="true"></div>
 
-    const videoEl = document.createElement('video');
-    videoEl.className = 'rfv-viewer__video';
+      <div class="rfv-viewer__top">
+        <span class="rfv-viewer__badge"></span>
+        <button type="button" class="rfv-viewer__icon rfv-viewer__close" title="Close" aria-label="Close reel">✕</button>
+      </div>
+
+      <div class="rfv-viewer__nav">
+        <button type="button" class="rfv-viewer__icon rfv-viewer__nav-btn" data-step="-1" title="Previous reel" aria-label="Previous reel">︿</button>
+        <button type="button" class="rfv-viewer__icon rfv-viewer__nav-btn" data-step="1" title="Next reel" aria-label="Next reel">﹀</button>
+      </div>
+
+      <div class="rfv-viewer__bottom">
+        <div class="rfv-viewer__progress" role="slider" tabindex="0"
+             aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div class="rfv-viewer__progress-fill"></div>
+        </div>
+        <div class="rfv-viewer__actions">
+          <button type="button" class="rfv-viewer__icon rfv-viewer__play" title="Pause" aria-label="Pause">❚❚</button>
+          <button type="button" class="rfv-viewer__icon rfv-viewer__sound" title="Mute" aria-label="Mute">🔊</button>
+          <span class="rfv-viewer__hint">Scroll for the next reel</span>
+        </div>
+      </div>
+    `;
+
+    const videoEl = stage.querySelector('.rfv-viewer__video');
+    const badge = stage.querySelector('.rfv-viewer__badge');
+    const progress = stage.querySelector('.rfv-viewer__progress');
+    const progressFill = stage.querySelector('.rfv-viewer__progress-fill');
+    const playButton = stage.querySelector('.rfv-viewer__play');
+    const soundButton = stage.querySelector('.rfv-viewer__sound');
+    const closeButton = stage.querySelector('.rfv-viewer__close');
+
     videoEl.src = sourceVideoEl.currentSrc || sourceVideoEl.src;
-    videoEl.loop = true;
-    videoEl.autoplay = true;
-    videoEl.controls = true;
-    videoEl.playsInline = true;
-    videoEl.setAttribute('playsinline', 'true');
-    // Opening the viewer is itself a user gesture, so sound is allowed here
-    // regardless of whether the page had been primed yet.
-  //  videoEl.muted = state.muted;
     videoEl.volume = 1;
 
     // Pick up where the card left off rather than restarting the clip.
@@ -325,21 +420,105 @@
       { once: true }
     );
 
-    const closeButton = document.createElement('button');
-    closeButton.type = 'button';
-    closeButton.className = 'rfv-viewer__close';
-    closeButton.textContent = '✕';
-    closeButton.title = 'Close';
-    closeButton.setAttribute('aria-label', 'Close reel');
+    videoEl.addEventListener('timeupdate', () => {
+      if (!videoEl.duration) return;
+      const percent = (videoEl.currentTime / videoEl.duration) * 100;
+      progressFill.style.width = `${percent}%`;
+      progress.setAttribute('aria-valuenow', String(Math.round(percent)));
+    });
+
+    const syncPlayButton = () => {
+      const paused = videoEl.paused;
+      playButton.textContent = paused ? '▶' : '❚❚';
+      playButton.title = paused ? 'Play' : 'Pause';
+      playButton.setAttribute('aria-label', playButton.title);
+    };
+    videoEl.addEventListener('play', syncPlayButton);
+    videoEl.addEventListener('pause', syncPlayButton);
+
+    const syncSoundButton = () => {
+      soundButton.textContent = videoEl.muted ? '🔇' : '🔊';
+      soundButton.title = videoEl.muted ? 'Unmute' : 'Mute';
+      soundButton.setAttribute('aria-label', soundButton.title);
+    };
+    syncSoundButton();
+
+    // Clicking the video toggles playback, the way a reel player should.
+    videoEl.addEventListener('click', () => {
+      if (videoEl.paused) videoEl.play().catch(() => {});
+      else videoEl.pause();
+    });
+
+    playButton.addEventListener('click', () => {
+      if (videoEl.paused) videoEl.play().catch(() => {});
+      else videoEl.pause();
+    });
+
+    soundButton.addEventListener('click', () => {
+      videoEl.muted = !videoEl.muted;
+      syncSoundButton();
+    });
+
     closeButton.addEventListener('click', closeReelViewer);
 
-    stage.append(videoEl, closeButton);
+    for (const button of stage.querySelectorAll('.rfv-viewer__nav-btn')) {
+      button.addEventListener('click', () => stepViewer(Number(button.dataset.step)));
+    }
+
+    const seekTo = (clientX) => {
+      const rect = progress.getBoundingClientRect();
+      const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+      if (videoEl.duration) videoEl.currentTime = ratio * videoEl.duration;
+    };
+    progress.addEventListener('pointerdown', (event) => {
+      event.stopPropagation();
+      seekTo(event.clientX);
+    });
+
     viewer.appendChild(stage);
 
     // Clicking the dimmed backdrop closes; clicking the video itself does not.
     viewer.addEventListener('click', (event) => {
       if (event.target === viewer) closeReelViewer();
     });
+
+    // Scrolling anywhere over the viewer moves this reel on, TikTok-style.
+    // The page behind stays scroll-locked so the wheel only drives the reel.
+    viewer.addEventListener(
+      'wheel',
+      (event) => {
+        if (Math.abs(event.deltaY) < 4) return;
+        event.preventDefault();
+        stepViewer(event.deltaY > 0 ? 1 : -1);
+      },
+      { passive: false }
+    );
+
+    let touchStartY = null;
+    viewer.addEventListener('touchstart', (event) => {
+      touchStartY = event.touches[0]?.clientY ?? null;
+    }, { passive: true });
+
+    viewer.addEventListener('touchend', (event) => {
+      if (touchStartY === null) return;
+      const delta = touchStartY - (event.changedTouches[0]?.clientY ?? touchStartY);
+      if (Math.abs(delta) > 50) stepViewer(delta > 0 ? 1 : -1);
+      touchStartY = null;
+    });
+
+    // Index of the reel on show, so stepping continues from the right place.
+    const entry = reels.get(hero);
+    state.viewer = {
+      hero,
+      videoEl,
+      stage,
+      badge,
+      progressFill,
+      index: (entry?.baseIndex ?? 0) + state.stepOffset,
+      loading: false,
+      lastStepAt: 0,
+    };
+    updateViewerBadge();
 
     state.previousBodyOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -688,7 +867,7 @@
       videoEl.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        openReelViewer(videoEl);
+        openReelViewer(hero, videoEl);
       });
 
       // Only add positioning if Canvas hasn't already positioned the hero
