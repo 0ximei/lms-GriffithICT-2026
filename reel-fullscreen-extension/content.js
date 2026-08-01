@@ -27,6 +27,15 @@
   const MIN_BREAK_SECONDS = 40;
   const MAX_BREAK_SECONDS = 5 * 60;
 
+  // Only the first course card plays a reel; the rest start locked.
+  const DEFAULT_UNLOCKED_SLOTS = 1;
+  const SLOTS_STORAGE_KEY = 'rfvUnlockedSlots';
+
+  // Simulated pricing for the demo unlock flow — nothing is ever charged.
+  function slotPrice(slotNumber) {
+    return (0.99 * 2 ** Math.max(0, slotNumber - 2)).toFixed(2);
+  }
+
   function randomInteger(min, max) {
     return Math.floor(Math.random() * (max - min + 1)) + min;
   }
@@ -40,7 +49,6 @@
     // blob: URLs are cached per source url so cards that reuse a reel don't
     // download the same video twice.
     blobUrls: new Map(),
-    attachedCount: 0,
     scanQueued: false,
     reportedError: false,
     control: null,
@@ -53,10 +61,30 @@
     breakTimer: null,
     scrollsSinceBreak: 0,
     scrollsBeforeBreak: randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS),
+    unlockedSlots: DEFAULT_UNLOCKED_SLOTS,
   };
 
   // hero element -> { videoEl, baseIndex }
   const reels = new Map();
+  // Every hero we've seen -> its slot number, locked or not, so slots can be
+  // filled in later when one is unlocked.
+  const heroSlots = new Map();
+  // course href -> slot number, so a course keeps its slot across the DOM
+  // rebuilds Canvas does when it re-renders the dashboard.
+  const slotByCourse = new Map();
+
+  async function loadUnlockedSlots() {
+    try {
+      const stored = await chrome.storage.local.get({ [SLOTS_STORAGE_KEY]: DEFAULT_UNLOCKED_SLOTS });
+      state.unlockedSlots = Math.max(DEFAULT_UNLOCKED_SLOTS, Number(stored[SLOTS_STORAGE_KEY]) || DEFAULT_UNLOCKED_SLOTS);
+    } catch {
+      state.unlockedSlots = DEFAULT_UNLOCKED_SLOTS;
+    }
+  }
+
+  function saveUnlockedSlots() {
+    chrome.storage.local.set({ [SLOTS_STORAGE_KEY]: state.unlockedSlots }).catch(() => {});
+  }
 
   function formatCountdown(seconds) {
     const minutes = Math.floor(seconds / 60);
@@ -320,10 +348,22 @@
       return button;
     };
 
+    const buyButton = document.createElement('button');
+    buyButton.type = 'button';
+    buyButton.className = 'rfv-reel-control__button rfv-reel-control__buy';
+    buyButton.textContent = '＋';
+    buyButton.title = 'Buy another reel slot';
+    buyButton.setAttribute('aria-label', buyButton.title);
+    buyButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      openShop();
+    });
+
     control.append(
       makeButton(-1, 'Previous reel on every course', '↑'),
       label,
-      makeButton(1, 'Next reel on every course', '↓')
+      makeButton(1, 'Next reel on every course', '↓'),
+      buyButton
     );
 
     control.addEventListener(
@@ -347,8 +387,117 @@
     return state.control;
   }
 
+  function renderLockedHero(hero, index) {
+    hero.classList.add('rfv-reel-hero', 'rfv-locked-hero');
+    hero.closest('.ic-DashboardCard__header')?.classList.add('rfv-has-reel');
+
+    if (getComputedStyle(hero).position === 'static') {
+      hero.style.position = 'relative';
+    }
+
+    const lock = document.createElement('div');
+    lock.className = 'rfv-lock';
+    // Decorative only — pointer-events are off in CSS so the card's own course
+    // link keeps working. Unlocking happens from the floating control.
+    lock.setAttribute('aria-hidden', 'true');
+    lock.innerHTML = `
+      <svg viewBox="0 0 24 24" class="rfv-lock__icon" focusable="false">
+        <path fill="currentColor" d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5Zm0 2a3 3 0 0 1 3 3v3H9V7a3 3 0 0 1 3-3Zm0 11a1.5 1.5 0 0 1 .75 2.8V19a.75.75 0 0 1-1.5 0v-1.2A1.5 1.5 0 0 1 12 15Z"/>
+      </svg>
+      <span class="rfv-lock__label">Slot ${index + 1} locked</span>
+    `;
+
+    hero.appendChild(lock);
+    hero.dataset.rfvReel = 'locked';
+  }
+
+  // Fill any slots that have become unlocked since the cards were rendered.
+  function applyUnlocks() {
+    pruneDetachedHeroes();
+
+    for (const [hero, index] of heroSlots) {
+      if (hero.dataset.rfvReel !== 'locked' || index >= state.unlockedSlots) continue;
+
+      hero.querySelector('.rfv-lock')?.remove();
+      hero.classList.remove('rfv-locked-hero');
+      hero.dataset.rfvReel = '';
+      attachReel(hero, index);
+    }
+    updateControlState();
+  }
+
+  function unlockNextSlot() {
+    state.unlockedSlots += 1;
+    saveUnlockedSlots();
+    applyUnlocks();
+  }
+
+  function closeShop() {
+    document.querySelector('.rfv-shop')?.remove();
+  }
+
+  function openShop() {
+    if (document.querySelector('.rfv-shop')) return;
+
+    const totalSlots = heroSlots.size;
+    const allUnlocked = state.unlockedSlots >= totalSlots;
+    const nextSlot = state.unlockedSlots + 1;
+
+    const shop = document.createElement('div');
+    shop.className = 'rfv-shop';
+    shop.setAttribute('role', 'dialog');
+    shop.setAttribute('aria-modal', 'true');
+    shop.innerHTML = `
+      <div class="rfv-shop__panel">
+        <p class="rfv-shop__kicker">Reel slots</p>
+        <h2 class="rfv-shop__title">${allUnlocked ? 'Every slot is unlocked' : `Unlock slot ${nextSlot}`}</h2>
+        <p class="rfv-shop__copy">
+          ${allUnlocked
+            ? `All ${totalSlots} course cards are already playing reels.`
+            : `You have ${state.unlockedSlots} of ${totalSlots} slots. Unlocking adds a reel to one more course card.`}
+        </p>
+        <div class="rfv-shop__actions">
+          ${allUnlocked ? '' : `<button type="button" class="rfv-shop__buy">Buy for $${slotPrice(nextSlot)}</button>`}
+          <button type="button" class="rfv-shop__close">${allUnlocked ? 'Close' : 'Maybe later'}</button>
+        </div>
+        <p class="rfv-shop__note">Demo only — no payment is taken and no details are collected.</p>
+      </div>
+    `;
+
+    shop.addEventListener('click', (event) => {
+      if (event.target === shop) closeShop();
+    });
+    shop.querySelector('.rfv-shop__close').addEventListener('click', closeShop);
+    shop.querySelector('.rfv-shop__buy')?.addEventListener('click', () => {
+      unlockNextSlot();
+      closeShop();
+    });
+
+    document.body.appendChild(shop);
+  }
+
+  function updateControlState() {
+    const buyButton = state.control?.querySelector('.rfv-reel-control__buy');
+    if (!buyButton) return;
+
+    const allUnlocked = state.unlockedSlots >= heroSlots.size;
+    buyButton.textContent = allUnlocked ? '★' : '＋';
+    buyButton.title = allUnlocked ? 'All reel slots unlocked' : 'Buy another reel slot';
+    buyButton.setAttribute('aria-label', buyButton.title);
+  }
+
   async function attachReel(hero, index) {
     if (hero.dataset.rfvReel) return;
+    heroSlots.set(hero, index);
+
+    // Locked slots show a padlock instead of downloading a reel.
+    if (index >= state.unlockedSlots) {
+      renderLockedHero(hero, index);
+      ensureControl();
+      updateControlState();
+      return;
+    }
+
     hero.dataset.rfvReel = 'pending';
 
     try {
@@ -395,6 +544,7 @@
 
       reels.set(hero, { videoEl, baseIndex });
       ensureControl();
+      updateControlState();
 
       hero.dataset.rfvReel = 'done';
     } catch (error) {
@@ -407,14 +557,51 @@
     }
   }
 
+  // A stable identity for the course a hero belongs to. Canvas re-renders the
+  // dashboard, destroying and rebuilding the card DOM, so the element itself
+  // can't be used to remember which slot a course was given.
+  function courseKeyFor(hero) {
+    const card = hero.closest('.ic-DashboardCard');
+    return (
+      card?.querySelector('.ic-DashboardCard__link')?.getAttribute('href') ||
+      card?.getAttribute('aria-label') ||
+      null
+    );
+  }
+
+  // Drop heroes Canvas has replaced, so slot totals reflect the cards actually
+  // on screen rather than every card ever rendered.
+  function pruneDetachedHeroes() {
+    for (const hero of heroSlots.keys()) {
+      if (!hero.isConnected) heroSlots.delete(hero);
+    }
+    for (const hero of reels.keys()) {
+      if (!hero.isConnected) reels.delete(hero);
+    }
+  }
+
   function scanForHeroes() {
     state.scanQueued = false;
+    pruneDetachedHeroes();
 
-    for (const hero of document.querySelectorAll(HERO_SELECTOR)) {
-      if (hero.dataset.rfvReel) continue;
-      attachReel(hero, state.attachedCount);
-      state.attachedCount += 1;
-    }
+    const heroes = [...document.querySelectorAll(HERO_SELECTOR)];
+
+    heroes.forEach((hero, position) => {
+      if (hero.dataset.rfvReel) return;
+
+      // Slot follows the card's position on the dashboard, remembered per
+      // course. Using a running counter meant every Canvas re-render handed
+      // out fresh, ever-higher numbers, so no card was ever slot 0.
+      const key = courseKeyFor(hero);
+      let slot = position;
+
+      if (key) {
+        if (!slotByCourse.has(key)) slotByCourse.set(key, position);
+        slot = slotByCourse.get(key);
+      }
+
+      attachReel(hero, slot);
+    });
   }
 
   function queueScan() {
@@ -427,6 +614,10 @@
     // isLmsSite is async — without the await this tests a Promise, which is
     // always truthy, so the guard would never actually block.
     if (window.top !== window.self || !(await isLmsSite())) return;
+
+    // Must resolve before the first scan, otherwise cards get locked against
+    // the default of 1 rather than what was actually unlocked.
+    await loadUnlockedSlots();
 
     queueScan();
 
