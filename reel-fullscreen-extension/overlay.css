@@ -66,3 +66,74 @@
   text-align: center;
   padding: 20px;
 }
+
+.rfv-eye-break {
+  position: fixed;
+  z-index: 2147483647;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(5, 10, 20, 0.96);
+  color: #f8fbff;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: center;
+  touch-action: none;
+}
+
+.rfv-eye-break-content {
+  display: grid;
+  justify-items: center;
+  gap: 18px;
+}
+
+.rfv-eye-break-kicker {
+  margin: 0;
+  color: #9cc7ff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.rfv-eye-break h2 {
+  max-width: 18ch;
+  margin: 0;
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
+  line-height: 1.08;
+}
+
+.rfv-eye-break-timer {
+  --rfv-break-progress: 1;
+  display: grid;
+  width: min(50vw, 220px);
+  aspect-ratio: 1;
+  place-items: center;
+  border-radius: 50%;
+  background: conic-gradient(#8ec5ff calc(var(--rfv-break-progress) * 1turn), rgba(255, 255, 255, 0.13) 0);
+  box-shadow: 0 0 44px rgba(115, 180, 255, 0.24);
+}
+
+.rfv-eye-break-timer::before {
+  grid-area: 1 / 1;
+  width: calc(100% - 14px);
+  height: calc(100% - 14px);
+  border-radius: inherit;
+  background: #0d1a2d;
+  content: "";
+}
+
+.rfv-eye-break-countdown {
+  z-index: 1;
+  grid-area: 1 / 1;
+  font-size: clamp(2rem, 7vw, 3.4rem);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.rfv-eye-break-copy {
+  margin: 0;
+  color: #c5d3e8;
+  font-size: 1rem;
+}
