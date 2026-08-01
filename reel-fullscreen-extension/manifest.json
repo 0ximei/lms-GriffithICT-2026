@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Reel Fullscreen Viewer",
+  "version": "1.0.0",
+  "description": "Watch Instagram Reels and Griffith LMS videos in a fullscreen canvas overlay with an adjustable semi-transparent backdrop.",
+  "permissions": ["storage", "tabs", "activeTab"],
+  "host_permissions": [
+    "*://*.instagram.com/*",
+    "*://*.griffith.edu.au/*",
+    "*://*.tiktok.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.instagram.com/*",
+        "*://*.griffith.edu.au/*"
+      ],
+      "all_frames": true,
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Reel Fullscreen Viewer"
+  }
+}
