@@ -1242,3 +1242,27 @@
   font-size: 0.7rem;
   text-align: center;
 }
+
+/* Hold-to-2x indicator: only visible while the press is held. */
+.rfv-viewer__speed {
+  position: absolute;
+  top: 58px;
+  left: 50%;
+  padding: 5px 12px;
+  transform: translateX(-50%) translateY(-4px);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #fff;
+  font: 700 11px/1 system-ui, sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease-out, transform 120ms ease-out;
+  backdrop-filter: blur(6px);
+}
+
+.rfv-viewer__stage.is-fast .rfv-viewer__speed {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}

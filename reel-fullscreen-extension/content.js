@@ -31,6 +31,7 @@
   const DEFAULT_UNLOCKED_SLOTS = 1;
   const SLOTS_STORAGE_KEY = 'rfvUnlockedSlots';
   const SLOT_MAP_STORAGE_KEY = 'rfvSlotByCourse';
+  const BREAKS_STORAGE_KEY = 'rfvActiveBreaks';
   const MUTED_STORAGE_KEY = 'rfvMuted';
   const STATS_STORAGE_KEY = 'rfvStats';
   const PRO_STORAGE_KEY = 'rfvPro';
@@ -44,6 +45,9 @@
   // Rolling utilisation monitor: one sample a second over a one-minute window.
   const MONITOR_SAMPLES = 60;
   const MONITOR_INTERVAL_MS = 1000;
+  // Hold-to-speed-up in the expanded player.
+  const LONG_PRESS_MS = 300;
+  const FAST_PLAYBACK_RATE = 2;
 
   // Simulated pricing for the demo unlock flow — nothing is ever charged.
   function slotPrice(slotNumber) {
@@ -74,6 +78,8 @@
     stepGeneration: 0,
     lastStepAt: 0,
     lastWatchedHero: null,
+    // Breaks read from storage at load, waiting for their card to render.
+    pendingBreaks: new Map(),
     scrollsSinceBreak: 0,
     scrollsBeforeBreak: randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS),
     unlockedSlots: DEFAULT_UNLOCKED_SLOTS,
@@ -127,7 +133,18 @@
         [STATS_STORAGE_KEY]: null,
         [PRO_STORAGE_KEY]: false,
         [SLOT_MAP_STORAGE_KEY]: null,
+        [BREAKS_STORAGE_KEY]: null,
       });
+
+      // Breaks in progress, so a refresh doesn't hand back a card the user is
+      // meant to be resting from. Anything already expired is dropped.
+      const storedBreaks = stored[BREAKS_STORAGE_KEY];
+      if (storedBreaks && typeof storedBreaks === 'object') {
+        const now = Date.now();
+        for (const [key, rest] of Object.entries(storedBreaks)) {
+          if (rest?.endsAt > now) state.pendingBreaks.set(key, rest);
+        }
+      }
       state.pro = Boolean(stored[PRO_STORAGE_KEY]);
 
       // Restore which slot each course holds. Without this the assignment is
@@ -151,6 +168,17 @@
 
   function saveUnlockedSlots() {
     chrome.storage.local.set({ [SLOTS_STORAGE_KEY]: state.unlockedSlots }).catch(() => {});
+  }
+
+  function saveActiveBreaks() {
+    const active = {};
+
+    for (const [hero, rest] of restingHeroes) {
+      const key = courseKeyFor(hero);
+      if (key) active[key] = { endsAt: rest.endsAt, duration: rest.duration };
+    }
+
+    chrome.storage.local.set({ [BREAKS_STORAGE_KEY]: active }).catch(() => {});
   }
 
   function saveSlotAssignments() {
@@ -408,6 +436,7 @@
 
     window.clearInterval(rest.timer);
     restingHeroes.delete(hero);
+    saveActiveBreaks();
 
     hero.querySelector('.rfv-eye-break')?.remove();
     hero.classList.remove('rfv-resting-hero');
@@ -445,29 +474,25 @@
     return null;
   }
 
-  function startEyeBreak() {
-    // Pro subscribers never get interrupted.
-    if (state.pro) return;
-
-    // Null once every card is already resting — nothing left to rest.
-    const hero = breakTargetHero();
-    if (!hero) return;
+  // Puts one card on a break that ends at `endsAt`. Split out from
+  // startEyeBreak so a break interrupted by a page reload can be rebuilt with
+  // its original end time rather than restarting from full duration.
+  function beginBreakOn(hero, endsAt, duration) {
+    if (!hero || isHeroResting(hero)) return;
 
     // The break covers the card, so the expanded player has to step aside.
     if (state.viewer?.hero === hero) closeReelViewer();
 
-    const duration = randomInteger(MIN_BREAK_SECONDS, MAX_BREAK_SECONDS);
-    const endsAt = Date.now() + duration * 1000;
-
     reels.get(hero)?.videoEl.pause();
     hideAdOverlay(hero);
 
+    const secondsRemaining = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
     const breakOverlay = document.createElement('div');
     breakOverlay.className = 'rfv-eye-break';
     breakOverlay.innerHTML = `
       <p class="rfv-eye-break-kicker">Screen break</p>
       <div class="rfv-eye-break-timer" role="timer" aria-label="Break time remaining">
-        <span class="rfv-eye-break-countdown">${formatCountdown(duration)}</span>
+        <span class="rfv-eye-break-countdown">${formatCountdown(secondsRemaining)}</span>
       </div>
       <p class="rfv-eye-break-copy">Rest your eyes — your other courses are still playing.</p>
       <button type="button" class="rfv-eye-break-upgrade">Skip with Pro</button>
@@ -498,9 +523,36 @@
       if (secondsLeft === 0) clearEyeBreak(hero);
     }
 
-    restingHeroes.set(hero, { timer: window.setInterval(updateTimer, 250), endsAt });
-    recordBreakTaken();
+    restingHeroes.set(hero, { timer: window.setInterval(updateTimer, 250), endsAt, duration });
     updateTimer();
+    saveActiveBreaks();
+  }
+
+  function startEyeBreak() {
+    // Pro subscribers never get interrupted.
+    if (state.pro) return;
+
+    // Null once every card is already resting — nothing left to rest.
+    const hero = breakTargetHero();
+    if (!hero) return;
+
+    const duration = randomInteger(MIN_BREAK_SECONDS, MAX_BREAK_SECONDS);
+    beginBreakOn(hero, Date.now() + duration * 1000, duration);
+    recordBreakTaken();
+  }
+
+  // Reinstates a break that was still running when the page was reloaded.
+  function restoreBreakFor(hero) {
+    if (state.pro || !state.pendingBreaks.size) return;
+
+    const key = courseKeyFor(hero);
+    const pending = key && state.pendingBreaks.get(key);
+    if (!pending) return;
+
+    state.pendingBreaks.delete(key);
+    if (pending.endsAt <= Date.now()) return;
+
+    beginBreakOn(hero, pending.endsAt, pending.duration);
   }
 
   function recordFeedScroll() {
@@ -634,6 +686,9 @@
       viewer.index = nextIndex;
       if (viewer.progressFill) viewer.progressFill.style.width = '0%';
       updateViewerBadge();
+      // playbackRate survives a src change, so a new reel would start at 2x.
+      viewer.videoEl.playbackRate = 1;
+      viewer.stage?.classList.remove('is-fast');
       viewer.videoEl.src = blobUrl;
       viewer.videoEl.load();
       viewer.videoEl.play().catch(() => {});
@@ -692,6 +747,7 @@
       <div class="rfv-viewer__scrim rfv-viewer__scrim--top"></div>
       <div class="rfv-viewer__scrim rfv-viewer__scrim--bottom"></div>
       <div class="rfv-viewer__spinner" aria-hidden="true"></div>
+      <div class="rfv-viewer__speed" aria-hidden="true">2× speed</div>
 
       <div class="rfv-viewer__top">
         <span class="rfv-viewer__badge"></span>
@@ -762,8 +818,44 @@
     };
     syncSoundButton();
 
+    // Hold to run at 2x, release to drop back — the gesture every reel app
+    // has. The press has to outlast LONG_PRESS_MS so an ordinary tap still
+    // reads as play/pause.
+    let pressTimer = null;
+    let didLongPress = false;
+
+    const startPress = (event) => {
+      if (event.button !== 0) return;
+      didLongPress = false;
+      pressTimer = window.setTimeout(() => {
+        didLongPress = true;
+        videoEl.playbackRate = FAST_PLAYBACK_RATE;
+        stage.classList.add('is-fast');
+      }, LONG_PRESS_MS);
+    };
+
+    const endPress = () => {
+      window.clearTimeout(pressTimer);
+      pressTimer = null;
+      videoEl.playbackRate = 1;
+      stage.classList.remove('is-fast');
+    };
+
+    videoEl.addEventListener('pointerdown', startPress);
+    videoEl.addEventListener('pointerup', endPress);
+    videoEl.addEventListener('pointercancel', endPress);
+    videoEl.addEventListener('pointerleave', endPress);
+    // A long press on touch would otherwise raise the context menu mid-hold.
+    videoEl.addEventListener('contextmenu', (event) => event.preventDefault());
+
     // Clicking the video toggles playback, the way a reel player should.
     videoEl.addEventListener('click', () => {
+      // The click that ends a long press shouldn't also pause the video.
+      if (didLongPress) {
+        didLongPress = false;
+        return;
+      }
+
       if (videoEl.paused) videoEl.play().catch(() => {});
       else videoEl.pause();
     });
@@ -909,9 +1001,14 @@
 
     // Precedence: locked beats ad beats reel. Locked and ad slots both fetch
     // nothing, so an unpaid or unsold position costs no bandwidth.
-    const baseIndex = reels.get(hero)?.baseIndex ?? 0;
+    //
+    // Keyed on the card's slot from heroSlots, never on the entry's baseIndex:
+    // stepViewer rewrites baseIndex as a feed cursor when the expanded player
+    // scrolls, so using it here turned paid-for cards into locked ones the
+    // next time this ran.
+    const slot = heroSlots.get(hero) ?? 0;
 
-    if (isSlotLocked(baseIndex)) {
+    if (isSlotLocked(slot)) {
       videoEl.pause();
       hideAdOverlay(hero);
       showLockOverlay(hero);
@@ -1197,8 +1294,8 @@
 
   // A card's lock never moves: the first N slots are the ones paid for, and
   // they stay unlocked no matter how far the feed has scrolled.
-  function isSlotLocked(baseIndex) {
-    return baseIndex >= state.unlockedSlots;
+  function isSlotLocked(slot) {
+    return slot >= state.unlockedSlots;
   }
 
   function showLockOverlay(hero) {
@@ -1691,6 +1788,10 @@
       reels.set(hero, { videoEl, baseIndex });
       ensureControl();
       updateControlState();
+
+      // Reinstate a break this card was serving before the page reloaded, so
+      // showVideoAt below leaves it resting instead of resuming playback.
+      restoreBreakFor(hero);
 
       // Decides ad vs reel for this feed position and loads accordingly.
       await showVideoAt(hero, videoEl, targetIndex);
