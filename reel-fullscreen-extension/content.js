@@ -8,6 +8,11 @@
     return /(^|\.)griffith\.edu\.au$/.test(location.hostname);
   }
 
+  const MIN_SCROLLS_BETWEEN_BREAKS = 2;
+  const MAX_SCROLLS_BETWEEN_BREAKS = 10;
+  const MIN_BREAK_SECONDS = 40;
+  const MAX_BREAK_SECONDS = 5 * 60;
+
   const state = {
     overlay: null,
     frameWrap: null,
@@ -15,9 +20,86 @@
     videos: [],
     currentIndex: 0,
     loading: false,
+    breakOverlay: null,
+    breakTimer: null,
+    scrollsSinceBreak: 0,
+    scrollsBeforeBreak: randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS),
   };
 
+  function randomInteger(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
+  function formatCountdown(seconds) {
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+  }
+
+  function clearEyeBreak() {
+    if (state.breakTimer) {
+      window.clearInterval(state.breakTimer);
+      state.breakTimer = null;
+    }
+    state.breakOverlay?.remove();
+    state.breakOverlay = null;
+  }
+
+  function startEyeBreak() {
+    if (state.breakOverlay || !document.body) return;
+
+    const duration = randomInteger(MIN_BREAK_SECONDS, MAX_BREAK_SECONDS);
+    const endsAt = Date.now() + duration * 1000;
+    const breakOverlay = document.createElement('section');
+    breakOverlay.className = 'rfv-eye-break';
+    breakOverlay.setAttribute('role', 'dialog');
+    breakOverlay.setAttribute('aria-modal', 'true');
+    breakOverlay.setAttribute('aria-labelledby', 'rfv-eye-break-title');
+    breakOverlay.innerHTML = `
+      <div class="rfv-eye-break-content">
+        <p class="rfv-eye-break-kicker">Screen break</p>
+        <h2 id="rfv-eye-break-title">Look away from your screen</h2>
+        <div class="rfv-eye-break-timer" role="timer" aria-label="Break time remaining">
+          <span class="rfv-eye-break-countdown">${formatCountdown(duration)}</span>
+        </div>
+        <p class="rfv-eye-break-copy">Give your eyes a moment to rest.</p>
+      </div>
+    `;
+
+    const countdown = breakOverlay.querySelector('.rfv-eye-break-countdown');
+    const timer = breakOverlay.querySelector('.rfv-eye-break-timer');
+    const preventScroll = (event) => event.preventDefault();
+    breakOverlay.addEventListener('wheel', preventScroll, { passive: false });
+    breakOverlay.addEventListener('touchmove', preventScroll, { passive: false });
+    document.body.appendChild(breakOverlay);
+    state.breakOverlay = breakOverlay;
+
+    function updateTimer() {
+      const secondsLeft = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
+      countdown.textContent = formatCountdown(secondsLeft);
+      timer.style.setProperty('--rfv-break-progress', String(secondsLeft / duration));
+
+      if (secondsLeft === 0) {
+        clearEyeBreak();
+        state.scrollsSinceBreak = 0;
+        state.scrollsBeforeBreak = randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS);
+      }
+    }
+
+    updateTimer();
+    state.breakTimer = window.setInterval(updateTimer, 250);
+  }
+
+  function recordFeedScroll() {
+    if (state.breakOverlay) return;
+    state.scrollsSinceBreak += 1;
+    if (state.scrollsSinceBreak >= state.scrollsBeforeBreak) {
+      startEyeBreak();
+    }
+  }
+
   function removeOverlay() {
+    clearEyeBreak();
     const overlay = document.getElementById('rfv-tiktok-overlay');
     if (overlay) {
       overlay.remove();
@@ -94,7 +176,7 @@
   }
 
   async function loadVideoByDirection(direction = 1) {
-    if (state.loading) return;
+    if (state.loading || state.breakOverlay) return false;
     state.loading = true;
 
     try {
@@ -127,6 +209,7 @@
         throw new Error('No TikTok video url returned');
       }
       await setVideoSource(video);
+      return true;
     } catch (error) {
       if (state.frameWrap) {
         state.frameWrap.innerHTML = '';
@@ -135,8 +218,16 @@
         fallback.textContent = error.message || 'Unable to load TikTok video right now.';
         state.frameWrap.appendChild(fallback);
       }
+      return false;
     } finally {
       state.loading = false;
+    }
+  }
+
+  async function moveThroughFeed(direction) {
+    const moved = await loadVideoByDirection(direction);
+    if (moved) {
+      recordFeedScroll();
     }
   }
 
@@ -175,7 +266,7 @@
       (event) => {
         if (Math.abs(event.deltaY) < 10) return;
         event.preventDefault();
-        loadVideoByDirection(event.deltaY > 0 ? 1 : -1);
+        moveThroughFeed(event.deltaY > 0 ? 1 : -1);
       },
       { passive: false }
     );
@@ -188,7 +279,7 @@
       if (touchStartY === null) return;
       const delta = touchStartY - event.changedTouches[0].clientY;
       if (Math.abs(delta) > 50) {
-        loadVideoByDirection(delta > 0 ? 1 : -1);
+        moveThroughFeed(delta > 0 ? 1 : -1);
       }
       touchStartY = null;
     });
@@ -226,19 +317,24 @@
 
   document.addEventListener('keydown', (event) => {
     if (!state.overlay) return;
+    if (state.breakOverlay) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
     if (event.key === 'Escape') {
       removeOverlay();
       return;
     }
     if (event.key === 'ArrowDown' || event.key === 'PageDown') {
       event.preventDefault();
-      loadVideoByDirection(1);
+      moveThroughFeed(1);
     }
     if (event.key === 'ArrowUp' || event.key === 'PageUp') {
       event.preventDefault();
-      loadVideoByDirection(-1);
+      moveThroughFeed(-1);
     }
-  });
+  }, true);
 
   if (document.body) {
     showOverlay();
