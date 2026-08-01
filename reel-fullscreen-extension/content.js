@@ -10,8 +10,7 @@
   // the feed has nothing more to give and start reusing clips.
   const MAX_BARREN_FETCHES = 3;
 
- 
- async function isLmsSite() {
+  async function isLmsSite() {
     let response = await fetch("https://" + location.hostname + "/web-app-manifest/manifest.json");
     if (response.ok) {
       let res = await response.json();
@@ -28,21 +27,36 @@
   const MIN_BREAK_SECONDS = 40;
   const MAX_BREAK_SECONDS = 5 * 60;
 
+  function randomInteger(min, max) {
+    return Math.floor(Math.random() * (max - min + 1)) + min;
+  }
+
   const state = {
     // Accumulated pool of unique reels. Stepping pulls further into this list
     // rather than wrapping, so a card never repeats a reel already shown.
     videos: [],
-    currentIndex: 0,
-    loading: false,
+    seenIds: new Set(),
+    fetchChain: null,
+    // blob: URLs are cached per source url so cards that reuse a reel don't
+    // download the same video twice.
+    blobUrls: new Map(),
+    attachedCount: 0,
+    scanQueued: false,
+    reportedError: false,
+    control: null,
+    // How far the whole dashboard has advanced. Stepped by the number of
+    // course cards so each step reveals an entirely fresh set of reels.
+    stepOffset: 0,
+    advancing: false,
+    lastStepAt: 0,
     breakOverlay: null,
     breakTimer: null,
     scrollsSinceBreak: 0,
     scrollsBeforeBreak: randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS),
   };
 
-  function randomInteger(min, max) {
-    return Math.floor(Math.random() * (max - min + 1)) + min;
-  }
+  // hero element -> { videoEl, baseIndex }
+  const reels = new Map();
 
   function formatCountdown(seconds) {
     const minutes = Math.floor(seconds / 60);
@@ -112,73 +126,6 @@
     }
   }
 
-  function removeOverlay() {
-    clearEyeBreak();
-    const overlay = document.getElementById('rfv-tiktok-overlay');
-    if (overlay) {
-      overlay.remove();
-      document.body.style.overflow = '';
-    }
-    state.overlay = null;
-    state.frameWrap = null;
-    state.videoEl = null;
-    state.videos = [];
-    state.currentIndex = 0;
-    state.loading = false;
-  }
-
-  async function setVideoSource(video) {
-    if (!state.videoEl || !video?.videoUrl) return;
-
-    try {
-      // Ask the background worker to install the declarativeNetRequest rule
-      // that rewrites the forbidden request headers (Cookie/Origin/Referer/...)
-      // and adds CORS headers to the response. Content scripts can't call
-      // chrome.declarativeNetRequest themselves.
-      const prepared = await chrome.runtime.sendMessage({ type: 'prepareTikTokVideoFetch' });
-      if (prepared?.error) {
-        throw new Error(prepared.error);
-      }
-
-      // Fetch here rather than in the background worker: the bytes would
-      // otherwise have to cross the extension message boundary, which is
-      // JSON-encoded and hard-capped at 64MiB.
-      const response = await fetch(video.videoUrl, {
-        method: 'GET',
-        headers: { accept: '*/*' },
-        credentials: 'omit',
-        redirect: 'follow',
-      });
-
-      if (!response.ok) {
-        throw new Error(`TikTok video request failed: ${response.status}`);
-      }
-
-      const blob = await response.blob();
-      if (!blob.size) {
-        throw new Error('TikTok returned an empty video body');
-      }
-
-      const blobUrl = URL.createObjectURL(blob);
-
-      if (state.videoEl.src && state.videoEl.src.startsWith('blob:')) {
-        URL.revokeObjectURL(state.videoEl.src);
-      }
-
-      state.videoEl.src = blobUrl;
-      state.videoEl.load();
-      state.videoEl.play().catch(() => {});
-    } catch (error) {
-      if (state.frameWrap) {
-        state.frameWrap.innerHTML = '';
-        const fallback = document.createElement('div');
-        fallback.className = 'rfv-tiktok-error';
-        fallback.textContent = error.message || 'Unable to load TikTok video right now.';
-        state.frameWrap.appendChild(fallback);
-      }
-    }
-  }
-
   async function fetchTikTokVideos() {
     const response = await chrome.runtime.sendMessage({ type: 'getTikTokVideoIds' });
     if (response?.error) {
@@ -205,47 +152,144 @@
   }
 
 
-  async function loadVideoByDirection(direction = 1) {
-    if (state.loading || state.breakOverlay) return false;
-    state.loading = true;
+  // Each call hits TIKTOK_API_URL again for another batch. It's a
+  // recommendation feed, so an occasional all-duplicate batch is normal —
+  // retry a few times before giving up rather than treating one as the end.
+  async function fillTo(minCount) {
+    let barrenFetches = 0;
+
+    while (state.videos.length < minCount && barrenFetches < MAX_BARREN_FETCHES) {
+      const batch = await fetchTikTokVideos();
+      const before = state.videos.length;
+
+      for (const video of batch) {
+        if (state.seenIds.has(video.id)) continue;
+        state.seenIds.add(video.id);
+        state.videos.push(video);
+      }
+
+      barrenFetches = state.videos.length === before ? barrenFetches + 1 : 0;
+    }
+
+    return state.videos;
+  }
+
+  // Serialized: cards attach concurrently and would otherwise all fire their
+  // own fetch for the same range.
+  function ensureVideos(minCount) {
+    state.fetchChain = (state.fetchChain ?? Promise.resolve()).then(() => fillTo(minCount));
+    return state.fetchChain;
+  }
+
+  async function createBlobUrl(videoUrl) {
+    // Ask the background worker to install the declarativeNetRequest rule that
+    // rewrites the forbidden request headers (Cookie/Origin/Referer/...) and
+    // adds CORS headers. Content scripts can't call chrome.declarativeNetRequest.
+    const prepared = await chrome.runtime.sendMessage({ type: 'prepareTikTokVideoFetch' });
+    if (prepared?.error) {
+      throw new Error(prepared.error);
+    }
+
+    // Fetched here rather than in the background worker: the bytes would
+    // otherwise cross the extension message boundary, which is JSON-encoded
+    // and hard-capped at 64MiB.
+    const response = await fetch(videoUrl, {
+      method: 'GET',
+      headers: { accept: '*/*' },
+      credentials: 'omit',
+      redirect: 'follow',
+    });
+
+    if (!response.ok) {
+      throw new Error(`TikTok video request failed: ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    if (!blob.size) {
+      throw new Error('TikTok returned an empty video body');
+    }
+
+    return URL.createObjectURL(blob);
+  }
+
+  function getBlobUrl(videoUrl) {
+    if (!state.blobUrls.has(videoUrl)) {
+      state.blobUrls.set(videoUrl, createBlobUrl(videoUrl));
+    }
+    return state.blobUrls.get(videoUrl);
+  }
+
+  // Pause reels that scroll out of view so a dashboard full of cards doesn't
+  // decode every video at once.
+  const visibilityObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          entry.target.play().catch(() => {});
+        } else {
+          entry.target.pause();
+        }
+      }
+    },
+    { threshold: 0.1 }
+  );
+
+  async function showVideoAt(hero, videoEl, index) {
+    const videos = await ensureVideos(index + 1);
+    if (!videos.length) return;
+
+    // Only wraps once the feed genuinely has no more reels to hand out.
+    const safeIndex = index < videos.length ? index : index % videos.length;
+    const blobUrl = await getBlobUrl(videos[safeIndex].videoUrl);
+
+    if (!hero.isConnected) return;
+
+    // Not revoked: blob URLs are cached and shared between cards showing the
+    // same reel, so revoking here would break the other cards using it.
+    videoEl.src = blobUrl;
+    videoEl.load();
+    videoEl.play().catch(() => {});
+  }
+
+  async function stepAll(step) {
+    const now = Date.now();
+    // One wheel gesture emits a burst of events, and cached reels resolve
+    // instantly, so without a cooldown a single flick would skip many reels.
+    if (state.advancing || state.breakOverlay || now - state.lastStepAt < STEP_COOLDOWN_MS) return;
+
+    for (const hero of reels.keys()) {
+      if (!hero.isConnected) reels.delete(hero);
+    }
+
+    const cardCount = reels.size;
+    if (!cardCount) return;
+
+    // Advance by one card per course, so every step hands out a completely
+    // fresh block of reels. Stepping by 1 would just shuffle the same reels
+    // between neighbouring cards, showing you clips you'd already seen.
+    const nextOffset = Math.max(0, state.stepOffset + step * cardCount);
+    if (nextOffset === state.stepOffset) return;
+
+    state.advancing = true;
+    state.lastStepAt = now;
+    state.control?.classList.add('rfv-reel-control--busy');
 
     try {
       state.stepOffset = nextOffset;
 
-      const targetIndex = state.currentIndex + direction;
-      if (targetIndex < 0) {
-        state.currentIndex = 0;
-      } else if (targetIndex >= state.videos.length) {
-        const moreVideos = await fetchTikTokVideos();
-        if (moreVideos.length) {
-          state.videos = state.videos.concat(moreVideos);
-          state.currentIndex = targetIndex;
-        } else {
-          state.currentIndex = Math.max(0, state.videos.length - 1);
-        }
-      } else {
-        state.currentIndex = targetIndex;
-      }
-
-      const video = state.videos[state.currentIndex];
-      if (!video?.videoUrl) {
-        throw new Error('No TikTok video url returned');
-      }
-      await setVideoSource(video);
-      return true;
-    } catch (error) {
-      if (state.frameWrap) {
-        state.frameWrap.innerHTML = '';
-        const fallback = document.createElement('div');
-        fallback.className = 'rfv-tiktok-error';
-        fallback.textContent = error.message || 'Unable to load TikTok video right now.';
-        state.frameWrap.appendChild(fallback);
-      }
-      return false;
+      await Promise.all(
+        Array.from(reels, ([hero, { videoEl, baseIndex }]) =>
+          showVideoAt(hero, videoEl, baseIndex + state.stepOffset).catch((error) => {
+            console.warn('[reel-fullscreen] Could not load reel:', error.message);
+          })
+        )
+      );
     } finally {
       state.advancing = false;
       state.control?.classList.remove('rfv-reel-control--busy');
     }
+
+    recordFeedScroll();
 
     // Pull the batch after this one now, so the next step doesn't stall on a
     // round trip to TIKTOK_API_URL.
