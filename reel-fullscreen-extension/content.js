@@ -1,10 +1,21 @@
 (() => {
-  if (window.__rfvTikTokOverlayInjected) return;
-  window.__rfvTikTokOverlayInjected = true;
+  if (window.__rfvTikTokReelsInjected) return;
+  window.__rfvTikTokReelsInjected = true;
 
-  const TIKTOK_API_URL = 'https://www.tiktok.com/api/recommend/item_list/?WebIdLastTime=1785549349&aid=1988&app_language=en-GB&app_name=tiktok_web&browser_language=en-AU&browser_name=Mozilla&browser_online=true&browser_platform=MacIntel&browser_version=5.0%20%28Macintosh%3B%20Intel%20Mac%20OS%20X%2010_15_7%29%20AppleWebKit%2F537.36%20%28KHTML%2C%20like%20Gecko%29%20Chrome%2F149.0.0.0%20Safari%2F537.36&channel=tiktok_web&clientABVersions=70508271%2C73720540%2C76124482%2C76314874%2C76378881%2C76388334%2C76406767%2C76424652%2C76432883%2C76463665%2C76484018%2C76523579%2C76581986%2C76600397%2C76604747%2C76612495%2C76615284%2C76622812%2C76689044%2C76702428%2C70405643%2C71057832%2C71200802%2C73171280%2C73208420%2C74008524%2C74276218%2C74413136%2C74844724%2C75330961&cookie_enabled=true&count=12&cpu_core_number=8&dark_mode=false&data_collection_enabled=true&day_of_week=6&device_id=7668876046959642129&device_platform=web_pc&device_score=8.12&device_type=web_h265&enable_cache=false&focus_state=false&from_page=fyp&history_len=2&isNonPersonalized=false&is_fullscreen=true&is_new_user=true&is_page_visible=true&itemID=&language=en&launch_mode=direct&network=1.4&odinId=7668876928619004946&os=mac&priority_region=&pullType=2&referer=&region=JP&screen_height=1169&screen_width=1800&showAboutThisAd=true&showAds=false&time_of_day=12&tz_name=Australia%2FBrisbane&video_encoding=dash&vv_count=16&vv_count_fyp=16&watchLiveLastTime=&webcast_language=en-GB&window_height=1042&window_width=1245&X-Dynosaur=MxapVm4WZWeZ9lCM9iBsrZIdOqVtsXUqRWnixyzCChZ-uXNODWITHb2hBd5ijQpWt37UU5MoPQKvjQb5Tty2/7yeC-6RCIi/6IrbEGH017fec4g9r5AccKzt/EyMhtQhQgtliJBEz55hFe-9c645jQev6u2Knf1Wt-kTpgZ6mUlGLzjA7hSkK8v-nbLngSfQ1x2ZDeQoJI/VjHx2pTmfuLOjs3zmTV3FqSxj9AWEZQKqdJfYQiNHyddrKViF014ahK9Rumlqc6/kpzhqt3YD4ub9NCUVsjOQDWJazAr3vJgdU9Do3kim2wGatsUguVe1/Bfo9lor5yE-HxmllMxlKH2kTj7RKcmcyTbtYZo8OG0w2QNWc9Lp5oQpqa/J3xUUXUwqoc1d9COYin/jw58RnqYJv-hA4mxqVwV0PJc4tjML1g7GZuPlJ6KJAy3Y&msToken=EZ7GcZKgO3GJE2suDsN8XyQQD5wiLgK8iXpNIpfCu3hZmxIk2Bc3tp_FxyXy7ER07A5pQM8xTl2roatOS3n2peHmoX6VpJJ7Q359zV7DPmUUhZzLqxmpVOOaWiLF6KHeA8ebZjuSsBQ0O6NaHsEJBukv8eywB2PPoQOtUUIwOg==&X-Bogus=1&X-Gnarly=Mwg1EoLEOzDEQXUNOxErUkmo/DIUIB5a7ejuydy2a7vs6x-eFaU4wc-npTcmhBzZvIQ6phmuuK6aTAOArKnRqtV1DtLdfWI7iurz5/vK22NbNDToyh6RzDYi5vzf/QR6MI08L--eVWODuOUAjonxGgGbdm2siowEhy4GA6MohVu8vRWXt/-f5aSHv9xdUCHQA7bP563MMGswuXQ8y7v1e3I74xTc7id-tFjI0a2KTwnFvDlawbbil95PBSRdoqwiHxNmBADcZQarw8a3c6padH0itRjD2sMrSl5Tz5Nvjxv0V8ZWG3HlX5D5RZ-vzrkD6M1Amwcnq3V1';
+  // Canvas LMS renders one of these per course card on the dashboard; it's the
+  // coloured/image banner at the top of each card.
+  const HERO_SELECTOR = '.ic-DashboardCard__header_hero';
+  const STEP_COOLDOWN_MS = 350;
+  // Consecutive fetches that return only already-seen reels before we accept
+  // the feed has nothing more to give and start reusing clips.
+  const MAX_BARREN_FETCHES = 3;
 
+<<<<<<< HEAD
    async function isLmsSite() {
+=======
+ 
+ async function isLmsSite() {
+>>>>>>> 614c58e (multiple reels)
     let response = await fetch("https://" + location.hostname + "/web-app-manifest/manifest.json");
     if (response.ok) {
       let res = await response.json();
@@ -16,16 +27,19 @@
     // return /(^|\.)griffith\.edu\.au$/.test(location.hostname);
   }
 
+<<<<<<< HEAD
   const MIN_SCROLLS_BETWEEN_BREAKS = 2;
   const MAX_SCROLLS_BETWEEN_BREAKS = 10;
   const MIN_BREAK_SECONDS = 40;
   const MAX_BREAK_SECONDS = 5 * 60;
+=======
+>>>>>>> 614c58e (multiple reels)
 
   const state = {
-    overlay: null,
-    frameWrap: null,
-    videoEl: null,
+    // Accumulated pool of unique reels. Stepping pulls further into this list
+    // rather than wrapping, so a card never repeats a reel already shown.
     videos: [],
+<<<<<<< HEAD
     currentIndex: 0,
     loading: false,
     breakOverlay: null,
@@ -172,17 +186,36 @@
       }
     }
   }
+=======
+    seenIds: new Set(),
+    fetchChain: null,
+    // blob: URLs are cached per source url so cards that reuse a reel don't
+    // download the same video twice.
+    blobUrls: new Map(),
+    attachedCount: 0,
+    scanQueued: false,
+    reportedError: false,
+    control: null,
+    // How far the whole dashboard has advanced. Stepped by the number of
+    // course cards so each step reveals an entirely fresh set of reels.
+    stepOffset: 0,
+    advancing: false,
+    lastStepAt: 0,
+  };
+
+  // hero element -> { videoEl, baseIndex }
+  const reels = new Map();
+>>>>>>> 614c58e (multiple reels)
 
   async function fetchTikTokVideos() {
     const response = await chrome.runtime.sendMessage({ type: 'getTikTokVideoIds' });
     if (response?.error) {
       throw new Error(response.error);
     }
-    return Array.isArray(response?.videos)
-      ? response.videos.filter(Boolean)
-      : [];
+    return Array.isArray(response?.videos) ? response.videos.filter(Boolean) : [];
   }
 
+<<<<<<< HEAD
   function wait(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
   }
@@ -204,17 +237,134 @@
   async function loadVideoByDirection(direction = 1) {
     if (state.loading || state.breakOverlay) return false;
     state.loading = true;
+=======
+  // Each call hits TIKTOK_API_URL again for another batch. It's a
+  // recommendation feed, so an occasional all-duplicate batch is normal —
+  // retry a few times before giving up rather than treating one as the end.
+  async function fillTo(minCount) {
+    let barrenFetches = 0;
 
-    try {
-      if (!state.videos.length) {
-        const videos = await fetchTikTokVideos();
-        if (!videos.length) {
-          throw new Error('No TikTok videos returned');
-        }
-        state.videos = videos;
-        state.currentIndex = 0;
+    while (state.videos.length < minCount && barrenFetches < MAX_BARREN_FETCHES) {
+      const batch = await fetchTikTokVideos();
+      const before = state.videos.length;
+
+      for (const video of batch) {
+        if (state.seenIds.has(video.id)) continue;
+        state.seenIds.add(video.id);
+        state.videos.push(video);
       }
 
+      barrenFetches = state.videos.length === before ? barrenFetches + 1 : 0;
+    }
+
+    return state.videos;
+  }
+
+  // Serialized: cards attach concurrently and would otherwise all fire their
+  // own fetch for the same range.
+  function ensureVideos(minCount) {
+    state.fetchChain = (state.fetchChain ?? Promise.resolve()).then(() => fillTo(minCount));
+    return state.fetchChain;
+  }
+
+  async function createBlobUrl(videoUrl) {
+    // Ask the background worker to install the declarativeNetRequest rule that
+    // rewrites the forbidden request headers (Cookie/Origin/Referer/...) and
+    // adds CORS headers. Content scripts can't call chrome.declarativeNetRequest.
+    const prepared = await chrome.runtime.sendMessage({ type: 'prepareTikTokVideoFetch' });
+    if (prepared?.error) {
+      throw new Error(prepared.error);
+    }
+
+    // Fetched here rather than in the background worker: the bytes would
+    // otherwise cross the extension message boundary, which is JSON-encoded
+    // and hard-capped at 64MiB.
+    const response = await fetch(videoUrl, {
+      method: 'GET',
+      headers: { accept: '*/*' },
+      credentials: 'omit',
+      redirect: 'follow',
+    });
+
+    if (!response.ok) {
+      throw new Error(`TikTok video request failed: ${response.status}`);
+    }
+
+    const blob = await response.blob();
+    if (!blob.size) {
+      throw new Error('TikTok returned an empty video body');
+    }
+
+    return URL.createObjectURL(blob);
+  }
+
+  function getBlobUrl(videoUrl) {
+    if (!state.blobUrls.has(videoUrl)) {
+      state.blobUrls.set(videoUrl, createBlobUrl(videoUrl));
+    }
+    return state.blobUrls.get(videoUrl);
+  }
+
+  // Pause reels that scroll out of view so a dashboard full of cards doesn't
+  // decode every video at once.
+  const visibilityObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          entry.target.play().catch(() => {});
+        } else {
+          entry.target.pause();
+        }
+      }
+    },
+    { threshold: 0.1 }
+  );
+
+  async function showVideoAt(hero, videoEl, index) {
+    const videos = await ensureVideos(index + 1);
+    if (!videos.length) return;
+
+    // Only wraps once the feed genuinely has no more reels to hand out.
+    const safeIndex = index < videos.length ? index : index % videos.length;
+    const blobUrl = await getBlobUrl(videos[safeIndex].videoUrl);
+
+    if (!hero.isConnected) return;
+
+    // Not revoked: blob URLs are cached and shared between cards showing the
+    // same reel, so revoking here would break the other cards using it.
+    videoEl.src = blobUrl;
+    videoEl.load();
+    videoEl.play().catch(() => {});
+  }
+
+  async function stepAll(step) {
+    const now = Date.now();
+    // One wheel gesture emits a burst of events, and cached reels resolve
+    // instantly, so without a cooldown a single flick would skip many reels.
+    if (state.advancing || now - state.lastStepAt < STEP_COOLDOWN_MS) return;
+
+    for (const hero of reels.keys()) {
+      if (!hero.isConnected) reels.delete(hero);
+    }
+
+    const cardCount = reels.size;
+    if (!cardCount) return;
+
+    // Advance by one card per course, so every step hands out a completely
+    // fresh block of reels. Stepping by 1 would just shuffle the same reels
+    // between neighbouring cards, showing you clips you'd already seen.
+    const nextOffset = Math.max(0, state.stepOffset + step * cardCount);
+    if (nextOffset === state.stepOffset) return;
+
+    state.advancing = true;
+    state.lastStepAt = now;
+    state.control?.classList.add('rfv-reel-control--busy');
+>>>>>>> 614c58e (multiple reels)
+
+    try {
+      state.stepOffset = nextOffset;
+
+<<<<<<< HEAD
       const targetIndex = state.currentIndex + direction;
       if (targetIndex < 0) {
         state.currentIndex = 0;
@@ -245,11 +395,28 @@
         state.frameWrap.appendChild(fallback);
       }
       return false;
+=======
+      await Promise.all(
+        Array.from(reels, ([hero, { videoEl, baseIndex }]) =>
+          showVideoAt(hero, videoEl, baseIndex + state.stepOffset).catch((error) => {
+            console.warn('[reel-fullscreen] Could not load reel:', error.message);
+          })
+        )
+      );
+>>>>>>> 614c58e (multiple reels)
     } finally {
-      state.loading = false;
+      state.advancing = false;
+      state.control?.classList.remove('rfv-reel-control--busy');
+    }
+
+    // Pull the batch after this one now, so the next step doesn't stall on a
+    // round trip to TIKTOK_API_URL.
+    if (step > 0) {
+      ensureVideos(state.stepOffset + cardCount * 2).catch(() => {});
     }
   }
 
+<<<<<<< HEAD
   async function moveThroughFeed(direction) {
     const moved = await loadVideoByDirection(direction);
     if (moved) {
@@ -260,43 +427,51 @@
   async function showOverlay() {
     if (window.top !== window.self || !isLmsSite()) return;
     if (document.getElementById('rfv-tiktok-overlay')) return;
+=======
+  function createControl() {
+    const control = document.createElement('div');
+    control.className = 'rfv-reel-control';
+>>>>>>> 614c58e (multiple reels)
 
-    const overlay = document.createElement('div');
-    overlay.id = 'rfv-tiktok-overlay';
-    overlay.className = 'rfv-tiktok-overlay';
-    state.overlay = overlay;
+    const label = document.createElement('span');
+    label.className = 'rfv-reel-control__label';
+    label.textContent = 'Reels';
 
-    const shell = document.createElement('div');
-    shell.className = 'rfv-tiktok-shell';
+    const makeButton = (step, text, glyph) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'rfv-reel-control__button';
+      button.setAttribute('aria-label', text);
+      button.title = text;
+      button.textContent = glyph;
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        stepAll(step);
+      });
+      return button;
+    };
 
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'rfv-tiktok-close';
-    closeBtn.textContent = '✕';
-    closeBtn.title = 'Close';
-    closeBtn.addEventListener('click', removeOverlay);
-    shell.appendChild(closeBtn);
+    control.append(
+      makeButton(-1, 'Previous reel on every course', '↑'),
+      label,
+      makeButton(1, 'Next reel on every course', '↓')
+    );
 
-    const frameWrap = document.createElement('div');
-    frameWrap.className = 'rfv-tiktok-frame';
-    state.frameWrap = frameWrap;
-
-    const loading = document.createElement('div');
-    loading.className = 'rfv-tiktok-loading';
-    loading.textContent = 'Loading TikTok video…';
-    frameWrap.appendChild(loading);
-    shell.appendChild(frameWrap);
-    overlay.appendChild(shell);
-
-    overlay.addEventListener(
+    control.addEventListener(
       'wheel',
       (event) => {
-        if (Math.abs(event.deltaY) < 10) return;
+        if (Math.abs(event.deltaY) < 4) return;
         event.preventDefault();
+<<<<<<< HEAD
         moveThroughFeed(event.deltaY > 0 ? 1 : -1);
+=======
+        stepAll(event.deltaY > 0 ? 1 : -1);
+>>>>>>> 614c58e (multiple reels)
       },
       { passive: false }
     );
 
+<<<<<<< HEAD
     let touchStartY = null;
     overlay.addEventListener('touchstart', (event) => {
       touchStartY = event.touches[0].clientY;
@@ -309,38 +484,80 @@
       }
       touchStartY = null;
     });
+=======
+    document.body.appendChild(control);
+    return control;
+  }
+>>>>>>> 614c58e (multiple reels)
 
-    document.body.appendChild(overlay);
-    document.body.style.overflow = 'hidden';
+  function ensureControl() {
+    if (!state.control?.isConnected) {
+      state.control = createControl();
+    }
+    return state.control;
+  }
+
+  async function attachReel(hero, index) {
+    if (hero.dataset.rfvReel) return;
+    hero.dataset.rfvReel = 'pending';
 
     try {
-      const videos = await fetchTikTokVideos();
+      // baseIndex is absolute, not wrapped: each card owns its own slot in the
+      // pool so no two cards ever land on the same reel.
+      const baseIndex = index;
+      const targetIndex = baseIndex + state.stepOffset;
+
+      const videos = await ensureVideos(targetIndex + 1);
       if (!videos.length) {
         throw new Error('No TikTok videos returned');
       }
-      state.videos = videos;
-      state.currentIndex = 0;
+
+      const safeIndex = targetIndex < videos.length ? targetIndex : targetIndex % videos.length;
+      const blobUrl = await getBlobUrl(videos[safeIndex].videoUrl);
+
+      // The card may have been re-rendered by Canvas while we were fetching.
+      if (!hero.isConnected) {
+        hero.dataset.rfvReel = '';
+        return;
+      }
 
       const videoEl = document.createElement('video');
-      videoEl.className = 'rfv-tiktok-iframe';
-      videoEl.setAttribute('autoplay', 'true');
-      videoEl.setAttribute('loop', 'true');
-      videoEl.setAttribute('muted', 'true');
+      videoEl.className = 'rfv-reel-video';
+      videoEl.src = blobUrl;
+      videoEl.autoplay = true;
+      videoEl.loop = true;
+      videoEl.muted = true;
+      videoEl.playsInline = true;
       videoEl.setAttribute('playsinline', 'true');
       videoEl.setAttribute('webkit-playsinline', 'true');
-      state.videoEl = videoEl;
-      frameWrap.innerHTML = '';
-      frameWrap.appendChild(videoEl);
-      await setVideoSource(videos[0]);
+
+      // Only add positioning if Canvas hasn't already positioned the hero
+      // itself (it does in the __header_image variant, to overlay the image).
+      if (getComputedStyle(hero).position === 'static') {
+        hero.style.position = 'relative';
+      }
+
+      hero.classList.add('rfv-reel-hero');
+      hero.closest('.ic-DashboardCard__header')?.classList.add('rfv-has-reel');
+      hero.appendChild(videoEl);
+      visibilityObserver.observe(videoEl);
+      videoEl.play().catch(() => {});
+
+      reels.set(hero, { videoEl, baseIndex });
+      ensureControl();
+
+      hero.dataset.rfvReel = 'done';
     } catch (error) {
-      frameWrap.innerHTML = '';
-      const fallback = document.createElement('div');
-      fallback.className = 'rfv-tiktok-error';
-      fallback.textContent = error.message || 'Unable to load TikTok video right now.';
-      frameWrap.appendChild(fallback);
+      hero.dataset.rfvReel = 'error';
+      // Every card fails for the same reason, so only report the first one.
+      if (!state.reportedError) {
+        state.reportedError = true;
+        console.error('[reel-fullscreen] Could not attach reels to dashboard cards:', error.message);
+      }
     }
   }
 
+<<<<<<< HEAD
   document.addEventListener('keydown', (event) => {
     if (!state.overlay) return;
     if (state.breakOverlay) {
@@ -361,10 +578,42 @@
       moveThroughFeed(-1);
     }
   }, true);
+=======
+  function scanForHeroes() {
+    state.scanQueued = false;
+
+    for (const hero of document.querySelectorAll(HERO_SELECTOR)) {
+      if (hero.dataset.rfvReel) continue;
+      attachReel(hero, state.attachedCount);
+      state.attachedCount += 1;
+    }
+  }
+
+  function queueScan() {
+    if (state.scanQueued) return;
+    state.scanQueued = true;
+    requestAnimationFrame(scanForHeroes);
+  }
+
+  async function start() {
+    // isLmsSite is async — without the await this tests a Promise, which is
+    // always truthy, so the guard would never actually block.
+    if (window.top !== window.self || !(await isLmsSite())) return;
+
+    queueScan();
+
+    // Canvas renders the dashboard with React, so cards can appear (or be
+    // swapped out on dashboard-view changes) well after document_idle.
+    new MutationObserver(queueScan).observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+  }
+>>>>>>> 614c58e (multiple reels)
 
   if (document.body) {
-    showOverlay();
+    start();
   } else {
-    document.addEventListener('DOMContentLoaded', showOverlay, { once: true });
+    document.addEventListener('DOMContentLoaded', start, { once: true });
   }
 })();
