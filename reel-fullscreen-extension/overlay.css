@@ -140,6 +140,7 @@
   position: relative;
   overflow: hidden;
   width: min(92vw, 420px);
+  width: fit-content;
   height: min(88vh, 746px);
   aspect-ratio: 9 / 16;
   border-radius: 22px;
