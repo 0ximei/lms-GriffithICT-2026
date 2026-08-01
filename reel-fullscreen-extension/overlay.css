@@ -12,6 +12,13 @@
   z-index: 0;
 }
 
+/* An unlocked banner sits above Canvas's full-card link so it can take the
+   click that opens the reel viewer. The card title, outside the banner, still
+   links through to the course. */
+.ic-DashboardCard__header_hero.rfv-reel-hero:not(.rfv-locked-hero) {
+  z-index: 2;
+}
+
 .ic-DashboardCard__header_hero.rfv-reel-hero .rfv-reel-video {
   position: absolute;
   inset: 0;
@@ -19,8 +26,7 @@
   height: 100%;
   object-fit: cover;
   display: block;
-  /* Canvas overlays a full-card link; let clicks pass through to it. */
-  pointer-events: none;
+  cursor: pointer;
 }
 
 /* Positioning the hero would otherwise let it paint over the card's title and
@@ -112,6 +118,57 @@
   font: 600 11px/1 system-ui, sans-serif;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+/* Expanded reel: big centred player over a dimmed dashboard. Sits below the
+   shop and the eye break so those still take precedence. */
+.rfv-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483645;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background: rgba(4, 8, 16, 0.82);
+  backdrop-filter: blur(4px);
+}
+
+.rfv-viewer__stage {
+  position: relative;
+  display: grid;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.rfv-viewer__video {
+  display: block;
+  width: auto;
+  max-width: min(92vw, 460px);
+  max-height: 88vh;
+  aspect-ratio: 9 / 16;
+  border-radius: 14px;
+  background: #000;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+  object-fit: contain;
+}
+
+.rfv-viewer__close {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.92);
+  color: #10192a;
+  font: 600 16px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rfv-viewer__close:hover {
+  background: #fff;
 }
 
 .rfv-shop {

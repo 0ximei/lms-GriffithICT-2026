@@ -30,6 +30,7 @@
   // Only the first course card plays a reel; the rest start locked.
   const DEFAULT_UNLOCKED_SLOTS = 1;
   const SLOTS_STORAGE_KEY = 'rfvUnlockedSlots';
+  const MUTED_STORAGE_KEY = 'rfvMuted';
 
   // Simulated pricing for the demo unlock flow — nothing is ever charged.
   function slotPrice(slotNumber) {
@@ -62,6 +63,10 @@
     scrollsSinceBreak: 0,
     scrollsBeforeBreak: randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS),
     unlockedSlots: DEFAULT_UNLOCKED_SLOTS,
+    muted: false,
+    // Browsers only allow autoplay with sound after the user has interacted
+    // with the page, so reels start silent and switch on at the first gesture.
+    audioPrimed: false,
   };
 
   // hero element -> { videoEl, baseIndex }
@@ -73,10 +78,14 @@
   // rebuilds Canvas does when it re-renders the dashboard.
   const slotByCourse = new Map();
 
-  async function loadUnlockedSlots() {
+  async function loadSettings() {
     try {
-      const stored = await chrome.storage.local.get({ [SLOTS_STORAGE_KEY]: DEFAULT_UNLOCKED_SLOTS });
+      const stored = await chrome.storage.local.get({
+        [SLOTS_STORAGE_KEY]: DEFAULT_UNLOCKED_SLOTS,
+        [MUTED_STORAGE_KEY]: false,
+      });
       state.unlockedSlots = Math.max(DEFAULT_UNLOCKED_SLOTS, Number(stored[SLOTS_STORAGE_KEY]) || DEFAULT_UNLOCKED_SLOTS);
+      state.muted = Boolean(stored[MUTED_STORAGE_KEY]);
     } catch {
       state.unlockedSlots = DEFAULT_UNLOCKED_SLOTS;
     }
@@ -84,6 +93,50 @@
 
   function saveUnlockedSlots() {
     chrome.storage.local.set({ [SLOTS_STORAGE_KEY]: state.unlockedSlots }).catch(() => {});
+  }
+
+  // Muted autoplay is always permitted; unmuted autoplay is not. Keep reels
+  // silent until the page has seen a real user gesture, then switch sound on.
+  function shouldMuteNow() {
+    return state.muted || !state.audioPrimed;
+  }
+
+  function applyMuteState() {
+    const muted = shouldMuteNow();
+
+    for (const { videoEl } of reels.values()) {
+      videoEl.muted = muted;
+      if (!muted) videoEl.volume = 1;
+      videoEl.play().catch(() => {});
+    }
+
+    const soundButton = state.control?.querySelector('.rfv-reel-control__sound');
+    if (soundButton) {
+      soundButton.textContent = state.muted ? '🔇' : '🔊';
+      soundButton.title = state.muted ? 'Unmute reels' : 'Mute reels';
+      soundButton.setAttribute('aria-label', soundButton.title);
+      soundButton.setAttribute('aria-pressed', String(!state.muted));
+    }
+  }
+
+  function toggleMute() {
+    state.muted = !state.muted;
+    state.audioPrimed = true;
+    chrome.storage.local.set({ [MUTED_STORAGE_KEY]: state.muted }).catch(() => {});
+    applyMuteState();
+  }
+
+  // The first click/keypress anywhere counts as the gesture that lets audio
+  // start, so reels come off mute without the user having to hunt for a button.
+  function primeAudioOnFirstGesture() {
+    const onGesture = () => {
+      if (state.audioPrimed) return;
+      state.audioPrimed = true;
+      applyMuteState();
+    };
+
+    document.addEventListener('pointerdown', onGesture, { capture: true, once: true });
+    document.addEventListener('keydown', onGesture, { capture: true, once: true });
   }
 
   function formatCountdown(seconds) {
@@ -207,6 +260,93 @@
   function ensureVideos(minCount) {
     state.fetchChain = (state.fetchChain ?? Promise.resolve()).then(() => fillTo(minCount));
     return state.fetchChain;
+  }
+
+  function onViewerKey(event) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeReelViewer();
+    }
+  }
+
+  function closeReelViewer() {
+    const viewer = document.querySelector('.rfv-viewer');
+    if (!viewer) return;
+
+    viewer.remove();
+    document.removeEventListener('keydown', onViewerKey, true);
+    document.body.style.overflow = state.previousBodyOverflow ?? '';
+
+    // Resume the dashboard reels that were paused while the viewer was open.
+    for (const { videoEl } of reels.values()) {
+      videoEl.play().catch(() => {});
+    }
+  }
+
+  function openReelViewer(sourceVideoEl) {
+    if (document.querySelector('.rfv-viewer')) return;
+
+    // Pause every card reel so its audio doesn't play under the viewer.
+    for (const { videoEl } of reels.values()) {
+      videoEl.pause();
+    }
+
+    const viewer = document.createElement('div');
+    viewer.className = 'rfv-viewer';
+    viewer.setAttribute('role', 'dialog');
+    viewer.setAttribute('aria-modal', 'true');
+    viewer.setAttribute('aria-label', 'Reel');
+
+    const stage = document.createElement('div');
+    stage.className = 'rfv-viewer__stage';
+
+    const videoEl = document.createElement('video');
+    videoEl.className = 'rfv-viewer__video';
+    videoEl.src = sourceVideoEl.currentSrc || sourceVideoEl.src;
+    videoEl.loop = true;
+    videoEl.autoplay = true;
+    videoEl.controls = true;
+    videoEl.playsInline = true;
+    videoEl.setAttribute('playsinline', 'true');
+    // Opening the viewer is itself a user gesture, so sound is allowed here
+    // regardless of whether the page had been primed yet.
+  //  videoEl.muted = state.muted;
+    videoEl.volume = 1;
+
+    // Pick up where the card left off rather than restarting the clip.
+    videoEl.addEventListener(
+      'loadedmetadata',
+      () => {
+        if (Number.isFinite(sourceVideoEl.currentTime)) {
+          videoEl.currentTime = sourceVideoEl.currentTime;
+        }
+        videoEl.play().catch(() => {});
+      },
+      { once: true }
+    );
+
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'rfv-viewer__close';
+    closeButton.textContent = '✕';
+    closeButton.title = 'Close';
+    closeButton.setAttribute('aria-label', 'Close reel');
+    closeButton.addEventListener('click', closeReelViewer);
+
+    stage.append(videoEl, closeButton);
+    viewer.appendChild(stage);
+
+    // Clicking the dimmed backdrop closes; clicking the video itself does not.
+    viewer.addEventListener('click', (event) => {
+      if (event.target === viewer) closeReelViewer();
+    });
+
+    state.previousBodyOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.body.appendChild(viewer);
+    document.addEventListener('keydown', onViewerKey, true);
+
+    closeButton.focus();
   }
 
   async function createBlobUrl(videoUrl) {
@@ -348,6 +488,18 @@
       return button;
     };
 
+    const soundButton = document.createElement('button');
+    soundButton.type = 'button';
+    soundButton.className = 'rfv-reel-control__button rfv-reel-control__sound';
+    soundButton.textContent = state.muted ? '🔇' : '🔊';
+    soundButton.title = state.muted ? 'Unmute reels' : 'Mute reels';
+    soundButton.setAttribute('aria-label', soundButton.title);
+    soundButton.setAttribute('aria-pressed', String(!state.muted));
+    soundButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      toggleMute();
+    });
+
     const buyButton = document.createElement('button');
     buyButton.type = 'button';
     buyButton.className = 'rfv-reel-control__button rfv-reel-control__buy';
@@ -363,6 +515,7 @@
       makeButton(-1, 'Previous reel on every course', '↑'),
       label,
       makeButton(1, 'Next reel on every course', '↓'),
+      soundButton,
       buyButton
     );
 
@@ -525,10 +678,18 @@
       videoEl.src = blobUrl;
       videoEl.autoplay = true;
       videoEl.loop = true;
-      videoEl.muted = true;
+      videoEl.muted = shouldMuteNow();
+      videoEl.volume = 1;
       videoEl.playsInline = true;
       videoEl.setAttribute('playsinline', 'true');
       videoEl.setAttribute('webkit-playsinline', 'true');
+
+      // The banner opens the reel; the card's title still links to the course.
+      videoEl.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openReelViewer(videoEl);
+      });
 
       // Only add positioning if Canvas hasn't already positioned the hero
       // itself (it does in the __header_image variant, to overlay the image).
@@ -617,7 +778,8 @@
 
     // Must resolve before the first scan, otherwise cards get locked against
     // the default of 1 rather than what was actually unlocked.
-    await loadUnlockedSlots();
+    await loadSettings();
+    primeAudioOnFirstGesture();
 
     queueScan();
 
