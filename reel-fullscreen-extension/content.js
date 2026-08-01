@@ -32,6 +32,8 @@
   const SLOTS_STORAGE_KEY = 'rfvUnlockedSlots';
   const MUTED_STORAGE_KEY = 'rfvMuted';
   const STATS_STORAGE_KEY = 'rfvStats';
+  const PRO_STORAGE_KEY = 'rfvPro';
+  const PRO_PRICE = '4.99';
   // A reel held for at least this long counts as actually watched rather than
   // scrolled past — the numerator of the scroll-efficiency figure.
   const ENGAGED_MS = 3000;
@@ -70,6 +72,8 @@
     scrollsSinceBreak: 0,
     scrollsBeforeBreak: randomInteger(MIN_SCROLLS_BETWEEN_BREAKS, MAX_SCROLLS_BETWEEN_BREAKS),
     unlockedSlots: DEFAULT_UNLOCKED_SLOTS,
+    pro: false,
+    bannerDismissed: false,
     muted: false,
     // Browsers only allow autoplay with sound after the user has interacted
     // with the page, so reels start silent and switch on at the first gesture.
@@ -111,7 +115,9 @@
         [SLOTS_STORAGE_KEY]: DEFAULT_UNLOCKED_SLOTS,
         [MUTED_STORAGE_KEY]: false,
         [STATS_STORAGE_KEY]: null,
+        [PRO_STORAGE_KEY]: false,
       });
+      state.pro = Boolean(stored[PRO_STORAGE_KEY]);
       state.unlockedSlots = Math.max(DEFAULT_UNLOCKED_SLOTS, Number(stored[SLOTS_STORAGE_KEY]) || DEFAULT_UNLOCKED_SLOTS);
       state.muted = Boolean(stored[MUTED_STORAGE_KEY]);
       if (stored[STATS_STORAGE_KEY]) {
@@ -148,21 +154,25 @@
     saveStats();
   }
 
-  // How much of the dashboard is streaming right now, 0–100. The CPU-meter
-  // analogue: every unlocked slot playing at once reads as fully loaded.
+  // Utilisation is counted the way a multi-core CPU meter counts load: each
+  // unlocked slot is one "core" worth 100%, so five reels playing reads 500%
+  // and ten reads 1000%. Full capacity is therefore slots × 100.
+  function monitorCapacity() {
+    return Math.max(100, reels.size * 100);
+  }
+
+  function reelsPlaying() {
+    return Array.from(reels.values()).filter(
+      ({ videoEl }) => !videoEl.paused && !videoEl.ended && videoEl.readyState >= 2
+    ).length;
+  }
+
   function currentUtilization() {
     // With the big player open you're watching one reel at full attention,
     // even though every card behind it is deliberately paused.
     if (state.viewer && !state.viewer.videoEl.paused) return 100;
 
-    const total = reels.size;
-    if (!total) return 0;
-
-    const playing = Array.from(reels.values()).filter(
-      ({ videoEl }) => !videoEl.paused && !videoEl.ended && videoEl.readyState >= 2
-    ).length;
-
-    return Math.round((playing / total) * 100);
+    return reelsPlaying() * 100;
   }
 
   function scrollsPerMinute() {
@@ -259,6 +269,100 @@
     document.addEventListener('keydown', onGesture, { capture: true, once: true });
   }
 
+  function closeProDialog() {
+    document.querySelector('.rfv-pro')?.remove();
+  }
+
+  function activatePro() {
+    state.pro = true;
+    chrome.storage.local.set({ [PRO_STORAGE_KEY]: true }).catch(() => {});
+
+    // Slots stay locked — Pro only buys out of the screen breaks. Any already
+    // on screen goes now rather than making the user sit out a timer they
+    // just paid to skip.
+    clearEyeBreak();
+    state.scrollsSinceBreak = 0;
+    refreshPromoBanner();
+  }
+
+  function openProDialog() {
+    if (document.querySelector('.rfv-pro')) return;
+
+    const dialog = document.createElement('div');
+    dialog.className = 'rfv-pro';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.innerHTML = `
+      <div class="rfv-pro__panel">
+        <p class="rfv-pro__kicker">Reel Fullscreen</p>
+        <h2 class="rfv-pro__title">Go Pro</h2>
+        <ul class="rfv-pro__benefits">
+          <li>Never see a screen break again</li>
+          <li>Scroll without interruption</li>
+        </ul>
+        <div class="rfv-pro__actions">
+          <button type="button" class="rfv-pro__buy">Subscribe — $${PRO_PRICE}/month</button>
+          <button type="button" class="rfv-pro__close">Not now</button>
+        </div>
+        <p class="rfv-pro__note">Demo only — no payment is taken and no details are collected.</p>
+      </div>
+    `;
+
+    dialog.addEventListener('click', (event) => {
+      if (event.target === dialog) closeProDialog();
+    });
+    dialog.querySelector('.rfv-pro__close').addEventListener('click', closeProDialog);
+    dialog.querySelector('.rfv-pro__buy').addEventListener('click', () => {
+      activatePro();
+      closeProDialog();
+    });
+
+    document.body.appendChild(dialog);
+    dialog.querySelector('.rfv-pro__buy').focus();
+  }
+
+  function removePromoBanner() {
+    document.getElementById('rfv-promo')?.remove();
+    document.body.style.paddingTop = state.previousBodyPadding ?? '';
+  }
+
+  function refreshPromoBanner() {
+    if (state.pro || state.bannerDismissed) {
+      removePromoBanner();
+      return;
+    }
+    injectPromoBanner();
+  }
+
+  function injectPromoBanner() {
+    if (state.pro || state.bannerDismissed) return;
+    if (document.getElementById('rfv-promo') || !document.body) return;
+
+    const banner = document.createElement('div');
+    banner.id = 'rfv-promo';
+    banner.className = 'rfv-promo';
+    banner.innerHTML = `
+      <span class="rfv-promo__tag">Pro</span>
+      <p class="rfv-promo__text">
+        Screen breaks interrupting your scrolling?
+        <strong>Upgrade to Pro</strong> to turn them off.
+      </p>
+      <button type="button" class="rfv-promo__cta">Upgrade — $${PRO_PRICE}/mo</button>
+      <button type="button" class="rfv-promo__dismiss" title="Dismiss" aria-label="Dismiss promotion">✕</button>
+    `;
+
+    banner.querySelector('.rfv-promo__cta').addEventListener('click', openProDialog);
+    banner.querySelector('.rfv-promo__dismiss').addEventListener('click', () => {
+      state.bannerDismissed = true;
+      removePromoBanner();
+    });
+
+    // Push Canvas's own header down rather than covering it.
+    state.previousBodyPadding = document.body.style.paddingTop;
+    document.body.prepend(banner);
+    document.body.style.paddingTop = `${banner.offsetHeight}px`;
+  }
+
   function formatCountdown(seconds) {
     const minutes = Math.floor(seconds / 60);
     const remainingSeconds = seconds % 60;
@@ -275,7 +379,8 @@
   }
 
   function startEyeBreak() {
-    if (state.breakOverlay || !document.body) return;
+    // Pro subscribers never get interrupted.
+    if (state.pro || state.breakOverlay || !document.body) return;
 
     const duration = randomInteger(MIN_BREAK_SECONDS, MAX_BREAK_SECONDS);
     const endsAt = Date.now() + duration * 1000;
@@ -292,11 +397,13 @@
           <span class="rfv-eye-break-countdown">${formatCountdown(duration)}</span>
         </div>
         <p class="rfv-eye-break-copy">Give your eyes a moment to rest.</p>
+        <button type="button" class="rfv-eye-break-upgrade">Upgrade to Pro to skip breaks</button>
       </div>
     `;
 
     const countdown = breakOverlay.querySelector('.rfv-eye-break-countdown');
     const timer = breakOverlay.querySelector('.rfv-eye-break-timer');
+    breakOverlay.querySelector('.rfv-eye-break-upgrade').addEventListener('click', openProDialog);
     const preventScroll = (event) => event.preventDefault();
     breakOverlay.addEventListener('wheel', preventScroll, { passive: false });
     breakOverlay.addEventListener('touchmove', preventScroll, { passive: false });
@@ -930,8 +1037,14 @@
     const samples = state.utilization;
     if (!samples.length) return { line: '', area: '' };
 
+    // The y-axis spans full capacity, so the plot reads as "how much of the
+    // dashboard is loaded" rather than rescaling every time a slot unlocks.
+    const capacity = monitorCapacity();
     const stepX = 300 / Math.max(1, samples.length - 1);
-    const points = samples.map((value, index) => [index * stepX, 100 - value]);
+    const points = samples.map((value, index) => [
+      index * stepX,
+      100 - Math.min(100, (value / capacity) * 100),
+    ]);
     const line = points.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(2)},${y.toFixed(2)}`).join(' ');
     const area = `${line} L300,100 L0,100 Z`;
 
@@ -943,24 +1056,27 @@
     if (!monitor) return;
 
     const samples = state.utilization;
+    const capacity = monitorCapacity();
     const current = samples.at(-1) ?? 0;
     const peak = samples.length ? Math.max(...samples) : 0;
     const average = samples.length
       ? Math.round(samples.reduce((sum, value) => sum + value, 0) / samples.length)
       : 0;
-    const playing = Array.from(reels.values()).filter(({ videoEl }) => !videoEl.paused).length;
     const { line, area } = utilizationPaths();
 
     monitor.querySelector('.rfv-mon__area').setAttribute('d', area);
     monitor.querySelector('.rfv-mon__line').setAttribute('d', line);
     monitor.querySelector('.rfv-mon__value').textContent = `${current}%`;
+    monitor.querySelector('.rfv-mon__capacity').textContent = `of ${capacity}%`;
+    monitor.querySelector('.rfv-mon__ceiling').textContent = `${capacity}%`;
     monitor.querySelector('.rfv-mon__plot').setAttribute(
       'aria-label',
-      `Reel utilisation over the last minute. Now ${current} percent, peak ${peak} percent, average ${average} percent.`
+      `Reel utilisation over the last minute, out of ${capacity} percent capacity. ` +
+        `Now ${current} percent, peak ${peak} percent, average ${average} percent.`
     );
 
     const readouts = {
-      active: `${playing}/${reels.size || 0}`,
+      active: `${reelsPlaying()}/${reels.size || 0}`,
       peak: `${peak}%`,
       average: `${average}%`,
       rate: `${scrollsPerMinute()}/min`,
@@ -979,10 +1095,14 @@
       <section class="rfv-mon">
         <div class="rfv-mon__head">
           <h3 class="rfv-mon__title">Reel utilisation</h3>
-          <p class="rfv-mon__value">0%</p>
+          <p class="rfv-mon__reading">
+            <span class="rfv-mon__value">0%</span>
+            <span class="rfv-mon__capacity">of 100%</span>
+          </p>
         </div>
 
         <div class="rfv-mon__plot-wrap">
+          <span class="rfv-mon__ceiling">100%</span>
           <svg class="rfv-mon__plot" viewBox="0 0 300 100" preserveAspectRatio="none"
                role="img" aria-label="Reel utilisation over the last minute">
             <g class="rfv-mon__grid">
@@ -1027,7 +1147,7 @@
       crosshair.hidden = false;
       crosshair.style.left = `${ratio * 100}%`;
       tip.hidden = false;
-      tip.textContent = `${secondsAgo === 0 ? 'now' : `${secondsAgo}s ago`} · ${value}%`;
+      tip.textContent = `${secondsAgo === 0 ? 'now' : `${secondsAgo}s ago`} · ${value}% of ${monitorCapacity()}%`;
       tip.style.left = `${ratio * 100}%`;
     });
 
@@ -1374,8 +1494,9 @@
 
   function scanForHeroes() {
     state.scanQueued = false;
-    // The nav exists on every Canvas page, not just the dashboard.
+    // The nav and banner exist on every Canvas page, not just the dashboard.
     injectNavTab();
+    refreshPromoBanner();
     pruneDetachedHeroes();
 
     const heroes = [...document.querySelectorAll(HERO_SELECTOR)];

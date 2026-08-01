@@ -778,12 +778,37 @@
 }
 
 /* Direct label for the live value — the one number that must always be read
-   without hovering. */
-.rfv-mon__value {
+   without hovering. Capacity sits beside it so 500% reads as "5 of 9 slots
+   loaded" rather than looking like an impossible percentage. */
+.rfv-mon__reading {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   margin: 0;
+}
+
+.rfv-mon__value {
   font-size: 1.6rem;
   font-weight: 700;
   line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.rfv-mon__capacity {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+/* Axis ceiling, so the plot's top edge has a stated value. */
+.rfv-mon__ceiling {
+  position: absolute;
+  top: -2px;
+  left: 0;
+  color: var(--text-muted);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
 .rfv-mon__plot-wrap {
@@ -868,4 +893,178 @@
   font-size: 0.95rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+/* ── Pro subscription promo ─────────────────────────────────────────────── */
+.rfv-promo {
+  position: relative;
+  z-index: 2147483640;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: linear-gradient(90deg, #10192a, #1b2c4a);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.12);
+  color: #f2f6ff;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.rfv-promo__tag {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: #ffd666;
+  color: #2a2000;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.rfv-promo__text {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.rfv-promo__cta {
+  flex: none;
+  margin-left: auto;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 999px;
+  background: #ffd666;
+  color: #2a2000;
+  font: 700 0.78rem system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rfv-promo__cta:hover {
+  background: #ffdf8a;
+}
+
+.rfv-promo__dismiss {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  color: #f2f6ff;
+  font: 12px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rfv-promo__dismiss:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* Upgrade prompt on the break screen. */
+.rfv-eye-break-upgrade {
+  margin-top: 4px;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 999px;
+  background: #ffd666;
+  color: #2a2000;
+  font: 700 0.85rem system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rfv-eye-break-upgrade:hover {
+  background: #ffdf8a;
+}
+
+/* ── Pro upgrade dialog ─────────────────────────────────────────────────── */
+.rfv-pro {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(4, 8, 16, 0.78);
+}
+
+.rfv-pro__panel {
+  width: min(100%, 380px);
+  padding: 26px;
+  border-radius: 18px;
+  background: #10192a;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 214, 102, 0.28);
+  color: #f2f6ff;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-align: center;
+}
+
+.rfv-pro__kicker {
+  margin: 0 0 4px;
+  color: #ffd666;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.rfv-pro__title {
+  margin: 0 0 16px;
+  font-size: 1.7rem;
+}
+
+.rfv-pro__benefits {
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+  text-align: left;
+}
+
+.rfv-pro__benefits li {
+  position: relative;
+  padding: 6px 0 6px 26px;
+  color: #c5d3e8;
+  font-size: 0.88rem;
+}
+
+.rfv-pro__benefits li::before {
+  position: absolute;
+  left: 4px;
+  color: #ffd666;
+  font-weight: 700;
+  content: "✓";
+}
+
+.rfv-pro__actions {
+  display: grid;
+  gap: 8px;
+}
+
+.rfv-pro__buy {
+  padding: 12px 18px;
+  border: none;
+  border-radius: 999px;
+  background: #ffd666;
+  color: #2a2000;
+  font: 700 0.92rem system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rfv-pro__buy:hover {
+  background: #ffdf8a;
+}
+
+.rfv-pro__close {
+  padding: 10px 18px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #e8eefc;
+  font: 600 0.85rem system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.rfv-pro__note {
+  margin: 16px 0 0;
+  color: #8fa3c0;
+  font-size: 0.7rem;
 }
