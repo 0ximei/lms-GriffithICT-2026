@@ -10,12 +10,8 @@
   // the feed has nothing more to give and start reusing clips.
   const MAX_BARREN_FETCHES = 3;
 
-<<<<<<< HEAD
-   async function isLmsSite() {
-=======
  
  async function isLmsSite() {
->>>>>>> 614c58e (multiple reels)
     let response = await fetch("https://" + location.hostname + "/web-app-manifest/manifest.json");
     if (response.ok) {
       let res = await response.json();
@@ -27,19 +23,15 @@
     // return /(^|\.)griffith\.edu\.au$/.test(location.hostname);
   }
 
-<<<<<<< HEAD
   const MIN_SCROLLS_BETWEEN_BREAKS = 2;
   const MAX_SCROLLS_BETWEEN_BREAKS = 10;
   const MIN_BREAK_SECONDS = 40;
   const MAX_BREAK_SECONDS = 5 * 60;
-=======
->>>>>>> 614c58e (multiple reels)
 
   const state = {
     // Accumulated pool of unique reels. Stepping pulls further into this list
     // rather than wrapping, so a card never repeats a reel already shown.
     videos: [],
-<<<<<<< HEAD
     currentIndex: 0,
     loading: false,
     breakOverlay: null,
@@ -186,26 +178,6 @@
       }
     }
   }
-=======
-    seenIds: new Set(),
-    fetchChain: null,
-    // blob: URLs are cached per source url so cards that reuse a reel don't
-    // download the same video twice.
-    blobUrls: new Map(),
-    attachedCount: 0,
-    scanQueued: false,
-    reportedError: false,
-    control: null,
-    // How far the whole dashboard has advanced. Stepped by the number of
-    // course cards so each step reveals an entirely fresh set of reels.
-    stepOffset: 0,
-    advancing: false,
-    lastStepAt: 0,
-  };
-
-  // hero element -> { videoEl, baseIndex }
-  const reels = new Map();
->>>>>>> 614c58e (multiple reels)
 
   async function fetchTikTokVideos() {
     const response = await chrome.runtime.sendMessage({ type: 'getTikTokVideoIds' });
@@ -215,7 +187,6 @@
     return Array.isArray(response?.videos) ? response.videos.filter(Boolean) : [];
   }
 
-<<<<<<< HEAD
   function wait(ms) {
       return new Promise(resolve => setTimeout(resolve, ms));
   }
@@ -237,134 +208,10 @@
   async function loadVideoByDirection(direction = 1) {
     if (state.loading || state.breakOverlay) return false;
     state.loading = true;
-=======
-  // Each call hits TIKTOK_API_URL again for another batch. It's a
-  // recommendation feed, so an occasional all-duplicate batch is normal —
-  // retry a few times before giving up rather than treating one as the end.
-  async function fillTo(minCount) {
-    let barrenFetches = 0;
-
-    while (state.videos.length < minCount && barrenFetches < MAX_BARREN_FETCHES) {
-      const batch = await fetchTikTokVideos();
-      const before = state.videos.length;
-
-      for (const video of batch) {
-        if (state.seenIds.has(video.id)) continue;
-        state.seenIds.add(video.id);
-        state.videos.push(video);
-      }
-
-      barrenFetches = state.videos.length === before ? barrenFetches + 1 : 0;
-    }
-
-    return state.videos;
-  }
-
-  // Serialized: cards attach concurrently and would otherwise all fire their
-  // own fetch for the same range.
-  function ensureVideos(minCount) {
-    state.fetchChain = (state.fetchChain ?? Promise.resolve()).then(() => fillTo(minCount));
-    return state.fetchChain;
-  }
-
-  async function createBlobUrl(videoUrl) {
-    // Ask the background worker to install the declarativeNetRequest rule that
-    // rewrites the forbidden request headers (Cookie/Origin/Referer/...) and
-    // adds CORS headers. Content scripts can't call chrome.declarativeNetRequest.
-    const prepared = await chrome.runtime.sendMessage({ type: 'prepareTikTokVideoFetch' });
-    if (prepared?.error) {
-      throw new Error(prepared.error);
-    }
-
-    // Fetched here rather than in the background worker: the bytes would
-    // otherwise cross the extension message boundary, which is JSON-encoded
-    // and hard-capped at 64MiB.
-    const response = await fetch(videoUrl, {
-      method: 'GET',
-      headers: { accept: '*/*' },
-      credentials: 'omit',
-      redirect: 'follow',
-    });
-
-    if (!response.ok) {
-      throw new Error(`TikTok video request failed: ${response.status}`);
-    }
-
-    const blob = await response.blob();
-    if (!blob.size) {
-      throw new Error('TikTok returned an empty video body');
-    }
-
-    return URL.createObjectURL(blob);
-  }
-
-  function getBlobUrl(videoUrl) {
-    if (!state.blobUrls.has(videoUrl)) {
-      state.blobUrls.set(videoUrl, createBlobUrl(videoUrl));
-    }
-    return state.blobUrls.get(videoUrl);
-  }
-
-  // Pause reels that scroll out of view so a dashboard full of cards doesn't
-  // decode every video at once.
-  const visibilityObserver = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        if (entry.isIntersecting) {
-          entry.target.play().catch(() => {});
-        } else {
-          entry.target.pause();
-        }
-      }
-    },
-    { threshold: 0.1 }
-  );
-
-  async function showVideoAt(hero, videoEl, index) {
-    const videos = await ensureVideos(index + 1);
-    if (!videos.length) return;
-
-    // Only wraps once the feed genuinely has no more reels to hand out.
-    const safeIndex = index < videos.length ? index : index % videos.length;
-    const blobUrl = await getBlobUrl(videos[safeIndex].videoUrl);
-
-    if (!hero.isConnected) return;
-
-    // Not revoked: blob URLs are cached and shared between cards showing the
-    // same reel, so revoking here would break the other cards using it.
-    videoEl.src = blobUrl;
-    videoEl.load();
-    videoEl.play().catch(() => {});
-  }
-
-  async function stepAll(step) {
-    const now = Date.now();
-    // One wheel gesture emits a burst of events, and cached reels resolve
-    // instantly, so without a cooldown a single flick would skip many reels.
-    if (state.advancing || now - state.lastStepAt < STEP_COOLDOWN_MS) return;
-
-    for (const hero of reels.keys()) {
-      if (!hero.isConnected) reels.delete(hero);
-    }
-
-    const cardCount = reels.size;
-    if (!cardCount) return;
-
-    // Advance by one card per course, so every step hands out a completely
-    // fresh block of reels. Stepping by 1 would just shuffle the same reels
-    // between neighbouring cards, showing you clips you'd already seen.
-    const nextOffset = Math.max(0, state.stepOffset + step * cardCount);
-    if (nextOffset === state.stepOffset) return;
-
-    state.advancing = true;
-    state.lastStepAt = now;
-    state.control?.classList.add('rfv-reel-control--busy');
->>>>>>> 614c58e (multiple reels)
 
     try {
       state.stepOffset = nextOffset;
 
-<<<<<<< HEAD
       const targetIndex = state.currentIndex + direction;
       if (targetIndex < 0) {
         state.currentIndex = 0;
@@ -395,15 +242,6 @@
         state.frameWrap.appendChild(fallback);
       }
       return false;
-=======
-      await Promise.all(
-        Array.from(reels, ([hero, { videoEl, baseIndex }]) =>
-          showVideoAt(hero, videoEl, baseIndex + state.stepOffset).catch((error) => {
-            console.warn('[reel-fullscreen] Could not load reel:', error.message);
-          })
-        )
-      );
->>>>>>> 614c58e (multiple reels)
     } finally {
       state.advancing = false;
       state.control?.classList.remove('rfv-reel-control--busy');
@@ -416,22 +254,9 @@
     }
   }
 
-<<<<<<< HEAD
-  async function moveThroughFeed(direction) {
-    const moved = await loadVideoByDirection(direction);
-    if (moved) {
-      recordFeedScroll();
-    }
-  }
-
-  async function showOverlay() {
-    if (window.top !== window.self || !isLmsSite()) return;
-    if (document.getElementById('rfv-tiktok-overlay')) return;
-=======
   function createControl() {
     const control = document.createElement('div');
     control.className = 'rfv-reel-control';
->>>>>>> 614c58e (multiple reels)
 
     const label = document.createElement('span');
     label.className = 'rfv-reel-control__label';
@@ -462,33 +287,14 @@
       (event) => {
         if (Math.abs(event.deltaY) < 4) return;
         event.preventDefault();
-<<<<<<< HEAD
-        moveThroughFeed(event.deltaY > 0 ? 1 : -1);
-=======
         stepAll(event.deltaY > 0 ? 1 : -1);
->>>>>>> 614c58e (multiple reels)
       },
       { passive: false }
     );
 
-<<<<<<< HEAD
-    let touchStartY = null;
-    overlay.addEventListener('touchstart', (event) => {
-      touchStartY = event.touches[0].clientY;
-    });
-    overlay.addEventListener('touchend', (event) => {
-      if (touchStartY === null) return;
-      const delta = touchStartY - event.changedTouches[0].clientY;
-      if (Math.abs(delta) > 50) {
-        moveThroughFeed(delta > 0 ? 1 : -1);
-      }
-      touchStartY = null;
-    });
-=======
     document.body.appendChild(control);
     return control;
   }
->>>>>>> 614c58e (multiple reels)
 
   function ensureControl() {
     if (!state.control?.isConnected) {
@@ -557,28 +363,6 @@
     }
   }
 
-<<<<<<< HEAD
-  document.addEventListener('keydown', (event) => {
-    if (!state.overlay) return;
-    if (state.breakOverlay) {
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-    if (event.key === 'Escape') {
-      removeOverlay();
-      return;
-    }
-    if (event.key === 'ArrowDown' || event.key === 'PageDown') {
-      event.preventDefault();
-      moveThroughFeed(1);
-    }
-    if (event.key === 'ArrowUp' || event.key === 'PageUp') {
-      event.preventDefault();
-      moveThroughFeed(-1);
-    }
-  }, true);
-=======
   function scanForHeroes() {
     state.scanQueued = false;
 
@@ -609,7 +393,6 @@
       subtree: true,
     });
   }
->>>>>>> 614c58e (multiple reels)
 
   if (document.body) {
     start();

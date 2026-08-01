@@ -97,9 +97,6 @@ const TIKTOK_VIDEO_COOKIE = 'tt_csrf_token=i4X6OEF9-eQXqAFVJ8DstXvEexlToBZnPJes;
 // and capped at 64MiB. The response rule below adds CORS headers so that
 // cross-origin fetch from the page is permitted.
 async function refreshTikTokVideoHeaderRule() {
-<<<<<<< HEAD
-  await chrome.declarativeNetRequest?.updateSessionRules({
-=======
   if (!chrome.declarativeNetRequest?.updateSessionRules) {
     throw new Error(
       'The "declarativeNetRequest" permission is missing from manifest.json — without it the TikTok CDN request cannot send Cookie/Origin/Referer and will 403.'
@@ -107,7 +104,6 @@ async function refreshTikTokVideoHeaderRule() {
   }
 
   await chrome.declarativeNetRequest.updateSessionRules({
->>>>>>> 614c58e (multiple reels)
     removeRuleIds: [TIKTOK_VIDEO_HEADER_RULE_ID],
     addRules: [
       {
